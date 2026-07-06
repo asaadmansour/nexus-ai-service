@@ -33,3 +33,7 @@ htmlcov/
 
 # Logs
 *.log
+
+# Docs
+sprint1.txt
+docs
