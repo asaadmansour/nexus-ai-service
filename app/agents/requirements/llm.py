@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from typing import Any
 
@@ -14,6 +15,7 @@ from app.agents.requirements.state import REQUIRED_BRIEF_FIELDS, RequirementsSta
 load_dotenv()
 
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+logger = logging.getLogger(__name__)
 
 REQUIREMENTS_EXTRACTION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -59,6 +61,7 @@ def extract_requirements_with_llm(state: RequirementsState) -> dict[str, Any]:
 def _generate_json_text(prompt: str) -> str:
     client = _get_client()
     generation_config = _build_generation_config()
+    generation_config[_get_response_schema_key(client)] = REQUIREMENTS_EXTRACTION_SCHEMA
     last_error: Exception | None = None
 
     for model in _get_model_candidates():
@@ -69,7 +72,7 @@ def _generate_json_text(prompt: str) -> str:
                 prompt,
                 generation_config,
             )
-        except Exception as exc:
+        except _retryable_generation_errors() as exc:
             last_error = exc
 
     if last_error:
@@ -107,6 +110,30 @@ def _generate_json_text_with_model(
         },
     )
     return getattr(interaction, "output_text", "") or ""
+
+
+def _get_response_schema_key(client: Any) -> str:
+    return "response_schema" if hasattr(client, "models") else "responseSchema"
+
+
+def _retryable_generation_errors() -> tuple[type[BaseException], ...]:
+    retryable_errors: list[type[BaseException]] = [TimeoutError, ConnectionError]
+
+    try:
+        from google.genai.errors import ServerError
+    except ImportError:
+        pass
+    else:
+        retryable_errors.append(ServerError)
+
+    try:
+        import httpx
+    except ImportError:
+        pass
+    else:
+        retryable_errors.extend([httpx.TimeoutException, httpx.TransportError])
+
+    return tuple(dict.fromkeys(retryable_errors))
 
 
 def _get_model_candidates() -> list[str]:
@@ -184,6 +211,7 @@ def _parse_json_object(raw_text: str) -> dict[str, Any]:
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError:
+        logger.warning("Failed to parse requirements model JSON response.", exc_info=True)
         return {}
 
     if not isinstance(parsed, dict):
@@ -260,14 +288,18 @@ def _clean_field_value(field: str, value: str) -> str | None:
         return None
 
     lowered = cleaned.lower()
+    earliest_marker_index: int | None = None
     for label in FIELD_LABELS:
         marker = f"{label}:"
         index = lowered.find(marker)
         if index == 0:
             return None
         if index > 0:
-            cleaned = cleaned[:index].strip(" ,;.-")
-            break
+            if earliest_marker_index is None or index < earliest_marker_index:
+                earliest_marker_index = index
+
+    if earliest_marker_index is not None:
+        cleaned = cleaned[:earliest_marker_index].strip(" ,;.-")
 
     if field == "targetUsers" and _looks_like_non_target_user_value(cleaned):
         return None

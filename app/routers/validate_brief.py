@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -6,6 +7,7 @@ from pydantic import BaseModel, Field
 from app.agents.requirements.graph import requirements_graph
 
 router = APIRouter(prefix="/agents", tags=["Requirements Agent"])
+logger = logging.getLogger(__name__)
 
 
 class ValidateBriefRequest(BaseModel):
@@ -33,10 +35,17 @@ def validate_brief(request: ValidateBriefRequest):
         "currentBrief": request.current_brief,
         "recentMessages": request.recent_messages,
     }
-    final_state = requirements_graph.invoke(
-        initial_state,
-        config={"configurable": {"thread_id": request.brief_id}},
-    )
+    try:
+        final_state = requirements_graph.invoke(
+            initial_state,
+            config={"configurable": {"thread_id": request.brief_id}},
+        )
+    except Exception as exc:
+        logger.exception("Requirements graph invocation failed.")
+        raise HTTPException(
+            status_code=503,
+            detail="Requirements validation is temporarily unavailable.",
+        ) from exc
 
     return {
         "isComplete": final_state.get("isComplete", False),

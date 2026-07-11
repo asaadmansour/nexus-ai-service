@@ -3,6 +3,8 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.routers.shared_models import ProjectSpec
+
 router = APIRouter(prefix="/agents", tags=["Scrum Master Agent"])
 
 
@@ -32,19 +34,11 @@ class BriefForTaskGeneration(BaseModel):
     ai_decided: dict[str, Any] | None = Field(default=None, alias="aiDecided")
 
 
-class ProjectSpecForTaskGeneration(BaseModel):
-    project_spec_id: str | None = Field(default=None, alias="projectSpecId")
-    status: str | None = None
-    api_contract: dict[str, Any] | None = Field(default=None, alias="apiContract")
-    design_tokens: dict[str, Any] | None = Field(default=None, alias="designTokens")
-    conventions: dict[str, Any] | None = None
-
-
 class GenerateTaskRequest(BaseModel):
     task_type: Literal["phase_0_spec", "implementation_breakdown"] = Field(alias="taskType")
     project: ProjectForTaskGeneration
     brief: BriefForTaskGeneration
-    project_spec: ProjectSpecForTaskGeneration | None = Field(default=None, alias="projectSpec")
+    project_spec: ProjectSpec | None = Field(default=None, alias="projectSpec")
 
 
 @router.post("/generate-task")
@@ -117,7 +111,7 @@ def generate_phase_0_spec_task(
 def generate_implementation_breakdown(
     project: ProjectForTaskGeneration,
     brief: BriefForTaskGeneration,
-    project_spec: ProjectSpecForTaskGeneration,
+    project_spec: ProjectSpec,
 ):
     return {
         "taskType": "implementation_breakdown",

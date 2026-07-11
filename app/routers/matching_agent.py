@@ -45,7 +45,9 @@ def matching_agent(request: MatchTaskRequest):
         "candidates": [
             {
                 "freelancerId": candidate.freelancerId,
-                "finalScore": candidate.vectorScore or 0.75,
+                "finalScore": (
+                    candidate.vectorScore if candidate.vectorScore is not None else 0.75
+                ),
                 "rationale": "Candidate is a mock match for the task."
             }
             for candidate in request.candidates

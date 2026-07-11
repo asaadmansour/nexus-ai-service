@@ -3,6 +3,8 @@ from typing import Any, Literal
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from app.routers.shared_models import ProjectSpec
+
 router = APIRouter(prefix="/agents", tags=["Evaluation Agent"])
 
 
@@ -17,14 +19,6 @@ class BriefForEvaluation(BaseModel):
     project_type: str | None = Field(default=None, alias="projectType")
     domain: str | None = None
     acceptance_criteria: list[str] = Field(default_factory=list, alias="acceptanceCriteria")
-
-
-class ProjectSpecForEvaluation(BaseModel):
-    project_spec_id: str | None = Field(default=None, alias="projectSpecId")
-    status: str | None = None
-    api_contract: dict[str, Any] | None = Field(default=None, alias="apiContract")
-    design_tokens: dict[str, Any] | None = Field(default=None, alias="designTokens")
-    conventions: dict[str, Any] | None = None
 
 
 class TaskForEvaluation(BaseModel):
@@ -55,7 +49,7 @@ class EvaluateSubmissionRequest(BaseModel):
     task: TaskForEvaluation
     submission: SubmissionForEvaluation
     brief: BriefForEvaluation | None = None
-    project_spec: ProjectSpecForEvaluation | None = Field(default=None, alias="projectSpec")
+    project_spec: ProjectSpec | None = Field(default=None, alias="projectSpec")
 
 
 @router.post("/evaluate-submission")

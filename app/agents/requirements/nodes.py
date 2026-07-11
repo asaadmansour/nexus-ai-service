@@ -78,7 +78,7 @@ def merge_brief_node(state: RequirementsState) -> dict[str, Any]:
 
     return {
         "mergedBrief": merged_brief,
-        "extractedFields": merged_brief,
+        "extractedFields": extracted_fields,
     }
 
 
