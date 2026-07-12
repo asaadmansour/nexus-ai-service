@@ -1,11 +1,14 @@
 import logging
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.agents.assessment_grading import grade_assessment
-
+from app.agents.assessment_grading import (
+    grade_assessment,
+    QuestionInput,
+    AnswerInput,
+)
 
 router = APIRouter(
     prefix="/agents",
@@ -13,29 +16,6 @@ router = APIRouter(
 )
 
 logger = logging.getLogger(__name__)
-
-
-class RubricInput(BaseModel):
-    maxScore: float
-    gradingNotes: str
-
-
-class QuestionInput(BaseModel):
-    id: str
-    questionType: str
-    skill: str
-    difficulty: str
-    prompt: str
-    rubric: RubricInput
-
-
-class AnswerValue(BaseModel):
-    value: Optional[str] = None
-
-
-class AnswerInput(BaseModel):
-    questionId: str
-    answer: AnswerValue
 
 
 class GradeAssessmentRequest(BaseModel):

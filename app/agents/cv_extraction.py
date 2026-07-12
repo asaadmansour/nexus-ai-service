@@ -1,7 +1,9 @@
+import ipaddress
+import socket
 import urllib.request
-import json
 import logging
 from typing import Optional
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 from google import genai
@@ -12,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+READ_CHUNK = MAX_FILE_SIZE + 1      # read one byte over the limit to detect oversize
 
 
 class CVSummary(BaseModel):
@@ -33,7 +36,69 @@ class CVExtractionResponse(BaseModel):
     )
 
 
+def _assert_public_host(hostname: str) -> None:
+    """
+    Resolve hostname and reject loopback, private, link-local,
+    multicast, reserved, or any other non-public address.
+    Raises ValueError on any rejected destination.
+    """
+    try:
+        addresses = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as exc:
+        raise ValueError(
+            f"Cannot resolve hostname: {hostname}"
+        ) from exc
+
+    for _, _, _, _, sockaddr in addresses:
+        raw_ip = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(raw_ip)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid IP address returned for hostname: {raw_ip}"
+            ) from exc
+
+        if (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise ValueError(
+                f"CV URL resolves to a disallowed address: {raw_ip}"
+            )
+
+
+def _validate_url(url: str) -> None:
+    """
+    Parse and SSRF-validate a URL before fetching it.
+    Allows only HTTP and HTTPS schemes with a public destination.
+    """
+    parsed = urlparse(url)
+
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            "CV URL must use HTTP or HTTPS."
+        )
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(
+            "CV URL must contain a valid hostname."
+        )
+
+    _assert_public_host(hostname)
+
+
 def process_cv_with_llm(cv_url: str) -> dict:
+
+    # Validate URL scheme and destination before fetching (SSRF protection)
+    try:
+        _validate_url(cv_url)
+    except ValueError:
+        raise
 
     # Download CV PDF
     try:
@@ -44,10 +109,24 @@ def process_cv_with_llm(cv_url: str) -> dict:
             }
         )
 
-        with urllib.request.urlopen(
-            req,
-            timeout=15
-        ) as response:
+        # Disable automatic redirects; we revalidate every redirect hop
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPRedirectHandler()
+        )
+
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                try:
+                    _validate_url(newurl)
+                except ValueError as exc:
+                    raise urllib.error.URLError(
+                        f"Redirect blocked (SSRF): {exc}"
+                    ) from exc
+                return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+        opener = urllib.request.build_opener(_NoRedirect())
+
+        with opener.open(req, timeout=15) as response:
 
             content_type = response.headers.get(
                 "Content-Type",
@@ -59,7 +138,8 @@ def process_cv_with_llm(cv_url: str) -> dict:
                     "Provided URL is not a PDF file."
                 )
 
-            pdf_bytes = response.read()
+            # Bound the read before checking size to avoid loading unlimited data
+            pdf_bytes = response.read(READ_CHUNK)
 
             if len(pdf_bytes) > MAX_FILE_SIZE:
                 raise ValueError(
@@ -119,7 +199,6 @@ Extract:
 Return JSON only.
 """
 
-
         response = client.models.generate_content(
             model="gemini-3.5-flash",
             contents=[
@@ -132,23 +211,20 @@ Return JSON only.
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=CVExtractionResponse,
-                temperature=0.0,
-                top_k=1,
-                top_p=0.1,
             ),
         )
 
+        # Prefer SDK-validated parsed result, fall back to JSON text
+        if response.parsed is not None:
+            result = response.parsed.model_dump()
+        else:
+            import json
+            result = json.loads(response.text)
 
-        result_json = json.loads(
-            response.text
-        )
+        result["cvUrl"] = cv_url
+        result["source"] = "llm"
 
-        result_json["cvUrl"] = cv_url
-        result_json["source"] = "llm"
-
-
-        return result_json
-
+        return result
 
     except Exception as e:
         logger.exception(

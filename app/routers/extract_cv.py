@@ -1,7 +1,7 @@
 import logging
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import AnyHttpUrl, BaseModel, Field
 
 from app.agents.cv_extraction import process_cv_with_llm
 
@@ -14,9 +14,8 @@ logger = logging.getLogger(__name__)
 
 
 class ExtractCvRequest(BaseModel):
-    cv_url: str = Field(
-        alias="cvUrl",
-        min_length=5
+    cv_url: AnyHttpUrl = Field(
+        alias="cvUrl"
     )
 
 
@@ -24,7 +23,7 @@ class ExtractCvRequest(BaseModel):
 def extract_cv(request: ExtractCvRequest):
 
     try:
-        result = process_cv_with_llm(request.cv_url)
+        result = process_cv_with_llm(str(request.cv_url))
 
         return result
 
