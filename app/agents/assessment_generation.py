@@ -81,6 +81,8 @@ Assessment requirements:
 - Questions must match the candidate's experience level.
 - Do not ask unrealistic senior-level questions for junior candidates.
 - Include at least one scenario question.
+- For larger assessments, keep each prompt focused enough to be answered within the total duration.
+- Cover all major claimed skills proportionally instead of repeating the same skill too often.
 
 Question design rules:
 
@@ -179,9 +181,15 @@ Allowed types:
 - scenario
 
 Recommended distribution:
-- 30-40% code/debugging multiple choice
+- 45-55% code/debugging multiple choice
 - 30-40% short answer reasoning questions
-- 20-30% scenario questions
+- 10-20% scenario questions
+
+For 40+ question assessments:
+- Use mostly concise practical questions.
+- Include several small code/debugging snippets.
+- Avoid making every question a long essay.
+- Keep scenario questions meaningful but limited.
 
 6. Make questions resistant to AI-only answering.
 
@@ -218,9 +226,10 @@ Scoring distribution:
 The total assessment score should be 100 points.
 
 Question weights:
-- Multiple choice questions: 10-20 points each.
-- Short answer questions: 15-25 points each.
-- Scenario questions: 25-40 points each.
+- For 40+ questions, most questions should be 2-3 points each.
+- Use 1-2 points for direct multiple choice checks.
+- Use 3-5 points for debugging or reasoning questions.
+- Use 5-8 points for the few larger scenario questions.
 
 Prefer higher scores for:
 - scenario questions

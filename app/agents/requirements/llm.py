@@ -29,7 +29,6 @@ REQUIREMENTS_EXTRACTION_SCHEMA: dict[str, Any] = {
         }
         for field in REQUIRED_BRIEF_FIELDS
     },
-    "additionalProperties": False,
 }
 
 FIELD_LABELS = {field.lower() for field in REQUIRED_BRIEF_FIELDS}
@@ -116,8 +115,8 @@ def _get_response_schema_key(client: Any) -> str:
     return "response_schema" if hasattr(client, "models") else "responseSchema"
 
 
-def _retryable_generation_errors() -> tuple[type[BaseException], ...]:
-    retryable_errors: list[type[BaseException]] = [TimeoutError, ConnectionError]
+def _retryable_generation_errors() -> tuple[type[Exception], ...]:
+    retryable_errors: list[type[Exception]] = [TimeoutError, ConnectionError]
 
     try:
         from google.genai.errors import ServerError

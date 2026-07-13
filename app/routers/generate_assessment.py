@@ -24,14 +24,14 @@ class GenerateAssessmentRequest(BaseModel):
     headline: Optional[str] = None
 
     question_count: int = Field(
-        default=6,
+        default=40,
         alias="questionCount",
         ge=1,
-        le=20
+        le=60
     )
 
     duration_seconds: int = Field(
-        default=1800,
+        default=2700,
         alias="durationSeconds",
         ge=60
     )

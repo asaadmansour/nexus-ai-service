@@ -8,7 +8,7 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-GENAI_TIMEOUT = 60.0
+GENAI_TIMEOUT = 120.0
 
 
 class QuestionResultResponse(BaseModel):
@@ -31,6 +31,8 @@ class GradeAssessmentResponse(BaseModel):
     ]
 
     feedback: str
+
+    profileSummary: str
 
     graderConfidence: float
 
@@ -214,6 +216,23 @@ Lower confidence:
 - Ambiguous answers.
 - Subjective scenarios.
 - Insufficient information.
+
+PROFILE SUMMARY:
+
+Return profileSummary as a detailed, evidence-based freelancer profile written for internal matching and admin review.
+It must be based only on the assessment performance, not on the CV alone.
+Include:
+- strongest demonstrated skills
+- weak or uncertain skill areas
+- practical problem-solving signals
+- communication and reasoning quality
+- seniority signal
+- suggested project fit
+- risks or review notes
+
+Make it specific enough to differentiate this freelancer from another candidate with similar CV keywords.
+Do not write generic praise.
+Do not mention private grading rules.
 
 
 Questions and answers:

@@ -128,22 +128,19 @@ def process_cv_with_llm(cv_url: str) -> dict:
 
         with opener.open(req, timeout=15) as response:
 
-            content_type = response.headers.get(
-                "Content-Type",
-                ""
-            )
-
-            if "pdf" not in content_type.lower():
-                raise ValueError(
-                    "Provided URL is not a PDF file."
-                )
-
-            # Bound the read before checking size to avoid loading unlimited data
+            # Bound the read before checking size to avoid loading unlimited data.
+            # Cloudinary raw assets may be served as application/octet-stream or
+            # without a .pdf-looking URL, so validate the actual PDF header bytes.
             pdf_bytes = response.read(READ_CHUNK)
 
             if len(pdf_bytes) > MAX_FILE_SIZE:
                 raise ValueError(
                     "CV file is too large. Maximum size is 10MB."
+                )
+
+            if b"%PDF-" not in pdf_bytes[:1024]:
+                raise ValueError(
+                    "Provided URL is not a PDF file."
                 )
 
     except ValueError:
