@@ -1,20 +1,29 @@
 import ipaddress
+import os
 import socket
 import urllib.request
 import logging
 from typing import Optional
 from urllib.parse import urlparse
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_CV_GEMINI_MODEL = "gemini-3.5-flash"
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 READ_CHUNK = MAX_FILE_SIZE + 1      # read one byte over the limit to detect oversize
+
+
+class CVExtractionServiceError(RuntimeError):
+    """Raised when the AI extraction provider cannot complete the request."""
 
 
 class CVSummary(BaseModel):
@@ -90,6 +99,63 @@ def _validate_url(url: str) -> None:
         )
 
     _assert_public_host(hostname)
+
+
+def _get_model_candidates() -> list[str]:
+    primary_model = (
+        os.getenv("GEMINI_CV_MODEL")
+        or os.getenv("GEMINI_MODEL")
+        or DEFAULT_CV_GEMINI_MODEL
+    )
+    fallback_models = os.getenv("GEMINI_CV_FALLBACK_MODELS", "")
+
+    models = [
+        primary_model,
+        *[
+            model.strip()
+            for model in fallback_models.split(",")
+            if model.strip()
+        ],
+    ]
+
+    return list(dict.fromkeys(models))
+
+
+def _generate_cv_extraction_response(client, pdf_bytes: bytes, prompt: str):
+    models = _get_model_candidates()
+
+    if not models:
+        raise CVExtractionServiceError(
+            "No Gemini model is configured for CV extraction."
+        )
+
+    last_model = models[-1]
+
+    for model in models:
+        try:
+            return client.models.generate_content(
+                model=model,
+                contents=[
+                    types.Part.from_bytes(
+                        data=pdf_bytes,
+                        mime_type="application/pdf"
+                    ),
+                    prompt
+                ],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=CVExtractionResponse,
+                ),
+            )
+        except errors.APIError as exc:
+            if model == last_model:
+                raise
+
+            logger.warning(
+                "Gemini CV extraction failed with model '%s'; trying fallback: %s",
+                model,
+                exc,
+            )
 
 
 def process_cv_with_llm(cv_url: str) -> dict:
@@ -196,19 +262,10 @@ Extract:
 Return JSON only.
 """
 
-        response = client.models.generate_content(
-            model="gemini-3.5-flash",
-            contents=[
-                types.Part.from_bytes(
-                    data=pdf_bytes,
-                    mime_type="application/pdf"
-                ),
-                prompt
-            ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=CVExtractionResponse,
-            ),
+        response = _generate_cv_extraction_response(
+            client,
+            pdf_bytes,
+            prompt,
         )
 
         # Prefer SDK-validated parsed result, fall back to JSON text
@@ -223,11 +280,20 @@ Return JSON only.
 
         return result
 
+    except errors.APIError as e:
+        logger.exception(
+            "Gemini CV extraction request failed."
+        )
+
+        raise CVExtractionServiceError(
+            "CV extraction AI provider is temporarily unavailable. Please retry shortly."
+        ) from e
+
     except Exception as e:
         logger.exception(
             "LLM extraction failed."
         )
 
-        raise ValueError(
+        raise CVExtractionServiceError(
             "Failed to extract CV using AI."
         ) from e

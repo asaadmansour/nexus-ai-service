@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.agents.assessment_grading import (
+    AssessmentGradingServiceError,
     grade_assessment,
     QuestionInput,
     AnswerInput,
@@ -46,12 +47,23 @@ def grade_assessment_route(
         return result
 
 
+    except AssessmentGradingServiceError as e:
+
+        raise HTTPException(
+            status_code=503,
+            detail=str(e),
+            headers={
+                "Retry-After": "30"
+            },
+        ) from e
+
+
     except ValueError as e:
 
         raise HTTPException(
             status_code=400,
             detail=str(e),
-        )
+        ) from e
 
 
     except Exception as exc:

@@ -3,7 +3,10 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import AnyHttpUrl, BaseModel, Field
 
-from app.agents.cv_extraction import process_cv_with_llm
+from app.agents.cv_extraction import (
+    CVExtractionServiceError,
+    process_cv_with_llm,
+)
 
 router = APIRouter(
     prefix="/agents",
@@ -27,11 +30,20 @@ def extract_cv(request: ExtractCvRequest):
 
         return result
 
+    except CVExtractionServiceError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=str(e),
+            headers={
+                "Retry-After": "30"
+            },
+        ) from e
+
     except ValueError as e:
         raise HTTPException(
             status_code=400,
             detail=str(e),
-        )
+        ) from e
 
     except Exception as exc:
         logger.exception("CV extraction failed.")

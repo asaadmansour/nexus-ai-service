@@ -1,13 +1,23 @@
 import json
 import logging
+import os
 from typing import Optional, List
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_ASSESSMENT_GEMINI_MODEL = "gemini-3.5-flash"
+
+
+class AssessmentGenerationServiceError(RuntimeError):
+    """Raised when the AI assessment provider cannot complete the request."""
 
 
 class AssessmentChoice(BaseModel):
@@ -34,6 +44,125 @@ class AssessmentQuestion(BaseModel):
 class AssessmentGenerationResponse(BaseModel):
     durationSeconds: int
     questions: List[AssessmentQuestion]
+
+
+def _get_model_candidates() -> List[str]:
+    primary_model = (
+        os.getenv("GEMINI_ASSESSMENT_MODEL")
+        or os.getenv("GEMINI_MODEL")
+        or DEFAULT_ASSESSMENT_GEMINI_MODEL
+    )
+    fallback_models = os.getenv("GEMINI_ASSESSMENT_FALLBACK_MODELS", "")
+
+    models = [
+        primary_model,
+        *[
+            model.strip()
+            for model in fallback_models.split(",")
+            if model.strip()
+        ],
+    ]
+
+    return list(dict.fromkeys(models))
+
+
+def _generate_assessment_response(client, prompt_text: str):
+    models = _get_model_candidates()
+
+    if not models:
+        raise AssessmentGenerationServiceError(
+            "No Gemini model is configured for assessment generation."
+        )
+
+    last_model = models[-1]
+
+    for model in models:
+        try:
+            return client.models.generate_content(
+                model=model,
+
+                contents=[
+                    prompt_text
+                ],
+
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=AssessmentGenerationResponse,
+                    temperature=0.0,
+                    top_k=1,
+                    top_p=0.1,
+                ),
+            )
+        except errors.APIError as exc:
+            if model == last_model:
+                raise
+
+            logger.warning(
+                "Gemini assessment generation failed with model '%s'; trying fallback: %s",
+                model,
+                exc,
+            )
+
+
+def _validate_generated_assessment_result(
+    result: dict,
+    question_count: int,
+    duration_seconds: int,
+) -> dict:
+    questions = result.get("questions")
+    if not isinstance(questions, list) or len(questions) != question_count:
+        raise AssessmentGenerationServiceError(
+            f"Assessment generator returned {len(questions) if isinstance(questions, list) else 0} questions instead of {question_count}."
+        )
+
+    seen_prompts: set[str] = set()
+    for index, question in enumerate(questions):
+        prompt = str(question.get("prompt", "")).strip()
+        normalized_prompt = " ".join(prompt.lower().split())
+        if not normalized_prompt:
+            raise AssessmentGenerationServiceError(
+                f"Question {index + 1} is missing a prompt."
+            )
+        if normalized_prompt in seen_prompts:
+            raise AssessmentGenerationServiceError(
+                f"Assessment generator returned duplicate question text at question {index + 1}."
+            )
+        seen_prompts.add(normalized_prompt)
+
+        question["orderIndex"] = index + 1
+        question_type = question.get("questionType")
+        if question_type not in {"multiple_choice", "short_answer", "scenario"}:
+            raise AssessmentGenerationServiceError(
+                f"Question {index + 1} has unsupported questionType '{question_type}'."
+            )
+
+        rubric = question.get("rubric")
+        if not isinstance(rubric, dict):
+            raise AssessmentGenerationServiceError(
+                f"Question {index + 1} is missing a rubric."
+            )
+        max_score = rubric.get("maxScore")
+        if not isinstance(max_score, int) or max_score <= 0:
+            raise AssessmentGenerationServiceError(
+                f"Question {index + 1} has an invalid maxScore."
+            )
+
+        choices = question.get("choices") or []
+        if question_type == "multiple_choice":
+            if not isinstance(choices, list) or len(choices) < 3:
+                raise AssessmentGenerationServiceError(
+                    f"Multiple choice question {index + 1} needs at least 3 choices."
+                )
+            choice_ids = {choice.get("id") for choice in choices if isinstance(choice, dict)}
+            if rubric.get("correctChoiceId") not in choice_ids:
+                raise AssessmentGenerationServiceError(
+                    f"Multiple choice question {index + 1} has no valid correctChoiceId."
+                )
+        else:
+            rubric["correctChoiceId"] = None
+
+    result["durationSeconds"] = int(result.get("durationSeconds") or duration_seconds)
+    return result
 
 
 def generate_assessment(
@@ -83,6 +212,8 @@ Assessment requirements:
 - Include at least one scenario question.
 - For larger assessments, keep each prompt focused enough to be answered within the total duration.
 - Cover all major claimed skills proportionally instead of repeating the same skill too often.
+- Every question prompt must be unique. Do not reuse the same scenario, code snippet, or wording with tiny edits.
+- Do not hallucinate skills the candidate did not claim. If a skill is broad, test practical fundamentals around it instead.
 
 Question design rules:
 
@@ -269,29 +400,36 @@ Do not include explanations outside JSON.
 
     try:
 
-        response = client.models.generate_content(
-            model="gemini-3.5-flash",
-
-            contents=[
-                prompt_text
-            ],
-
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=AssessmentGenerationResponse,
-                temperature=0.0,
-                top_k=1,
-                top_p=0.1,
-            ),
+        response = _generate_assessment_response(
+            client,
+            prompt_text,
         )
 
 
-        result = json.loads(
-            response.text
+        if response.parsed is not None:
+            result = response.parsed.model_dump()
+        else:
+            result = json.loads(
+                response.text
+            )
+
+
+        return _validate_generated_assessment_result(
+            result,
+            question_count,
+            duration_seconds,
         )
 
 
-        return result
+    except errors.APIError as e:
+
+        logger.exception(
+            "Gemini assessment generation request failed."
+        )
+
+        raise AssessmentGenerationServiceError(
+            "Assessment generation AI provider is temporarily unavailable. Please retry shortly."
+        ) from e
 
 
     except Exception as e:
@@ -300,6 +438,6 @@ Do not include explanations outside JSON.
             "LLM assessment generation failed."
         )
 
-        raise ValueError(
+        raise AssessmentGenerationServiceError(
             "Failed to generate assessment using AI."
         ) from e

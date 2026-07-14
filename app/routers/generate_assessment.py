@@ -4,7 +4,10 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.agents.assessment_generation import generate_assessment
+from app.agents.assessment_generation import (
+    AssessmentGenerationServiceError,
+    generate_assessment,
+)
 
 
 router = APIRouter(
@@ -53,11 +56,20 @@ def generate_assessment_route(
 
         return result
 
+    except AssessmentGenerationServiceError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=str(e),
+            headers={
+                "Retry-After": "30"
+            },
+        ) from e
+
     except ValueError as e:
         raise HTTPException(
             status_code=400,
             detail=str(e),
-        )
+        ) from e
 
     except Exception as exc:
         logger.exception(

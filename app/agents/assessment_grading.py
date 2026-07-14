@@ -1,14 +1,24 @@
+import json
 import logging
+import os
 from typing import List, Literal, Optional
 
+from dotenv import load_dotenv
 from pydantic import BaseModel
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_GRADING_GEMINI_MODEL = "gemini-3.5-flash"
 GENAI_TIMEOUT = 120.0
+
+
+class AssessmentGradingServiceError(RuntimeError):
+    """Raised when the AI grading provider cannot complete the request."""
 
 
 class QuestionResultResponse(BaseModel):
@@ -73,6 +83,151 @@ class AnswerInput(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _get_model_candidates() -> List[str]:
+    primary_model = (
+        os.getenv("GEMINI_GRADING_MODEL")
+        or os.getenv("GEMINI_MODEL")
+        or DEFAULT_GRADING_GEMINI_MODEL
+    )
+    fallback_models = os.getenv("GEMINI_GRADING_FALLBACK_MODELS", "")
+
+    models = [
+        primary_model,
+        *[
+            model.strip()
+            for model in fallback_models.split(",")
+            if model.strip()
+        ],
+    ]
+
+    return list(dict.fromkeys(models))
+
+
+def _generate_grading_response(client, prompt_text: str):
+    models = _get_model_candidates()
+
+    if not models:
+        raise AssessmentGradingServiceError(
+            "No Gemini model is configured for assessment grading."
+        )
+
+    last_model = models[-1]
+
+    for model in models:
+        try:
+            return client.models.generate_content(
+                model=model,
+
+                contents=[
+                    prompt_text
+                ],
+
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=GradeAssessmentResponse,
+                    temperature=0.0,
+                    top_k=1,
+                    top_p=0.1,
+                    http_options=types.HttpOptions(timeout=int(GENAI_TIMEOUT * 1000)),
+                ),
+            )
+        except errors.APIError as exc:
+            if model == last_model:
+                raise
+
+            logger.warning(
+                "Gemini assessment grading failed with model '%s'; trying fallback: %s",
+                model,
+                exc,
+            )
+
+
+def _normalize_grading_result(
+    result: dict,
+    assessment_id: str,
+    questions: List[QuestionInput],
+) -> dict:
+    if result.get("assessmentId") != assessment_id:
+        logger.warning(
+            "AI returned mismatched assessmentId '%s', correcting to '%s'.",
+            result.get("assessmentId"),
+            assessment_id,
+        )
+        result["assessmentId"] = assessment_id
+
+    question_by_id = {question.id: question for question in questions}
+    returned_results = result.get("questionResults") or []
+    normalized_results: list[dict] = []
+    seen_question_ids: set[str] = set()
+
+    for raw_result in returned_results:
+        question_id = raw_result.get("questionId")
+        question = question_by_id.get(question_id)
+        if not question:
+            logger.warning(
+                "AI returned result for unknown question ID '%s'; ignoring it.",
+                question_id,
+            )
+            continue
+        if question_id in seen_question_ids:
+            logger.warning(
+                "AI returned duplicate grading result for question ID '%s'; ignoring duplicate.",
+                question_id,
+            )
+            continue
+
+        max_score = float(question.rubric.maxScore or raw_result.get("maxScore") or 0)
+        score = float(raw_result.get("score") or 0)
+        score = max(0.0, min(score, max_score))
+        normalized_results.append(
+            {
+                "questionId": question_id,
+                "score": score,
+                "maxScore": max_score,
+                "feedback": raw_result.get("feedback")
+                or "No detailed AI feedback returned for this answer.",
+            }
+        )
+        seen_question_ids.add(question_id)
+
+    for question in questions:
+        if question.id in seen_question_ids:
+            continue
+        max_score = float(question.rubric.maxScore or 0)
+        normalized_results.append(
+            {
+                "questionId": question.id,
+                "score": 0.0,
+                "maxScore": max_score,
+                "feedback": "No grading result was returned for this answer, so it needs admin review.",
+            }
+        )
+
+    total_score = sum(item["score"] for item in normalized_results)
+    total_max_score = sum(item["maxScore"] for item in normalized_results)
+    percent_score = (
+        round((total_score / total_max_score) * 100, 2)
+        if total_max_score > 0
+        else 0.0
+    )
+
+    result["questionResults"] = normalized_results
+    result["score"] = percent_score
+    result["maxScore"] = 100.0
+    result["recommendation"] = (
+        "pass"
+        if percent_score >= 80
+        else "needs_review"
+        if percent_score >= 50
+        else "fail"
+    )
+    result["graderConfidence"] = max(
+        0.0,
+        min(float(result.get("graderConfidence") or 0.5), 1.0),
+    )
+    return result
+
 
 def grade_assessment(
     assessment_id: str,
@@ -184,6 +339,11 @@ For each question:
 - Assign a score between 0 and maxScore.
 - Provide short actionable feedback.
 - Explain missing important points when score is reduced.
+- Return exactly one questionResults item for every provided question ID.
+- Do not invent, rename, skip, or duplicate question IDs.
+- Overall score must be a percentage from 0 to 100.
+- Overall maxScore must be 100.
+- The final recommendation must follow the score thresholds exactly.
 
 
 RECOMMENDATION RULES:
@@ -313,52 +473,31 @@ Return ONLY JSON matching the required schema.
 """
 
     try:
-        response = client.models.generate_content(
-            model="gemini-3.5-flash",
-
-            contents=[
-                prompt_text
-            ],
-
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=GradeAssessmentResponse,
-                temperature=0.0,
-                top_k=1,
-                top_p=0.1,
-                http_options=types.HttpOptions(timeout=int(GENAI_TIMEOUT * 1000)),
-            ),
+        response = _generate_grading_response(
+            client,
+            prompt_text,
         )
 
         # Prefer SDK-validated parsed result, fall back to JSON text
         if response.parsed is not None:
             result = response.parsed.model_dump()
         else:
-            import json
             result = json.loads(response.text)
 
-        # Validate assessmentId matches what was submitted
-        if result.get("assessmentId") != assessment_id:
-            logger.warning(
-                "AI returned mismatched assessmentId '%s', correcting to '%s'.",
-                result.get("assessmentId"),
-                assessment_id,
-            )
-            result["assessmentId"] = assessment_id
+        return _normalize_grading_result(result, assessment_id, questions)
 
-        # Validate questionResults IDs match submitted question IDs
-        submitted_ids = {q.id for q in questions}
-        returned_results = result.get("questionResults", [])
-        for qr in returned_results:
-            if qr.get("questionId") not in submitted_ids:
-                raise ValueError(
-                    f"AI returned result for unknown question ID: {qr.get('questionId')}"
-                )
-
-        return result
-
-    except ValueError:
+    except AssessmentGradingServiceError:
         raise
+
+    except errors.APIError as e:
+
+        logger.exception(
+            "Gemini assessment grading request failed."
+        )
+
+        raise AssessmentGradingServiceError(
+            "Assessment grading AI provider is temporarily unavailable. Please retry shortly."
+        ) from e
 
     except Exception as e:
 
@@ -366,6 +505,6 @@ Return ONLY JSON matching the required schema.
             "LLM assessment grading failed."
         )
 
-        raise ValueError(
+        raise AssessmentGradingServiceError(
             "Failed to grade assessment using AI."
         ) from e
