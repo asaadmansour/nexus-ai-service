@@ -10,17 +10,17 @@ USER_REQUIRED_BRIEF_FIELDS = [
 
 
 QUESTION_BY_FIELD = {
-    "businessDomain": "What kind of business or domain is this for?",
-    "mainGoal": "What is the main thing you want this project to achieve?",
-    "targetUsers": "Who will use this most: customers, staff, admins, or another group?",
-    "coreFeatures": "What are the must-have features you want in the first version?",
-    "platforms": "Where should this run: website, mobile app, both, or something else?",
-    "deliverables": "What final deliverables would feel complete to you, like a working website, mobile app, dashboard, setup help, or simply \"not sure\"?",
-    "constraintsPreferences": "Any preferences or constraints we should respect, like colors, style, integrations, or things you want to avoid?",
-    "clientBackground": "What is your background here: business owner, operations, non-technical founder, technical founder, or something else?",
-    "suggestedTeamSize": "Do you already have a team size in mind, or should we suggest what fits the project?",
-    "experienceLevel": "Do you prefer a junior, mid, senior, or expert freelancer, or should we decide based on the scope?",
-    "experienceMinYears": "Do you have a minimum years-of-experience preference, or is there no preference?",
+    "businessDomain": "Nice, that gives me a better starting point. What kind of business or domain is this for? For example bakery, clinic, tutoring, ecommerce, logistics, or anything similar.",
+    "mainGoal": "That helps. What is the main outcome you want from this project for your business? For example sell online, manage bookings, track stock, reduce manual work, or reach more customers.",
+    "targetUsers": "Got it. Who will use it, and what should each group be able to do? For example customers place orders, staff manage stock, and admins track sales.",
+    "coreFeatures": "Great. What are the must-have features for the first version? Short bullets are fine, like online payments, product catalog, order tracking, dashboard, notifications, or stock management.",
+    "platforms": "Makes sense. Where should this run: website, mobile app, admin dashboard, or all of them? If you are not sure, tell me how people will use it and I will help translate that.",
+    "deliverables": "Good. What final things should be handed over when the work is done? For example a working website, mobile app, admin dashboard, source code, deployment/setup help, or simply \"not sure\".",
+    "constraintsPreferences": "Any preferences or constraints we should respect? This can be simple: colors, style, payment provider, delivery rules, integrations, language, or things you want to avoid.",
+    "clientBackground": "To guide this properly, what is your background here? For example business owner, operations, non-technical founder, technical founder, or something else.",
+    "suggestedTeamSize": "Do you already have a team size in mind, or should we suggest what fits the scope? It is completely okay to say \"not sure\".",
+    "experienceLevel": "Do you prefer junior, mid, senior, or expert freelancers, or should we decide based on the project complexity?",
+    "experienceMinYears": "Do you have a minimum years-of-experience preference, or should we keep it open and match based on skill scores instead?",
 }
 
 
@@ -50,6 +50,16 @@ def extract_requirements_node(state: RequirementsState) -> dict[str, Any]:
         extracted_fields = {}
     if not isinstance(assistant_reply, str):
         assistant_reply = None
+
+    pending_field = state.get("pendingField")
+    latest_message = state.get("latestMessage", "")
+    if (
+        isinstance(pending_field, str)
+        and _is_advice_request(latest_message)
+        and _is_uncertain_value(extracted_fields.get(pending_field))
+    ):
+        extracted_fields = dict(extracted_fields)
+        extracted_fields.pop(pending_field, None)
 
     return {
         "useFastPath": False,
@@ -182,3 +192,46 @@ def _has_value(value: Any) -> bool:
         return bool(value)
 
     return True
+
+
+def _is_advice_request(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+
+    normalized = " ".join(value.lower().split())
+    advice_markers = (
+        "what do you suggest",
+        "what do u suggest",
+        "what should",
+        "what would you",
+        "what would u",
+        "recommend",
+        "suggest",
+        "help me choose",
+        "what do you mean",
+        "explain",
+    )
+    uncertainty_markers = ("idk", "i don't know", "i dont know", "not sure")
+    return any(marker in normalized for marker in advice_markers) and (
+        "?" in normalized
+        or any(marker in normalized for marker in uncertainty_markers)
+    )
+
+
+def _is_uncertain_value(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+
+    normalized = value.lower().replace("_", " ").replace("-", " ").strip()
+    normalized = " ".join(normalized.split())
+    return normalized in {
+        "idk",
+        "i do not know",
+        "i don't know",
+        "not sure",
+        "not sure yet",
+        "notsure",
+        "no preference",
+        "no preferences",
+        "not decided",
+    }

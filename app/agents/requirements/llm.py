@@ -17,18 +17,32 @@ load_dotenv()
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 logger = logging.getLogger(__name__)
 
+REQUIREMENT_FIELD_VALUE_SCHEMA: dict[str, Any] = {
+    "anyOf": [
+        {"type": "string"},
+        {"type": "number"},
+        {"type": "array", "items": {"type": "string"}},
+    ]
+}
+
 REQUIREMENTS_EXTRACTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        field: {
+        "extractedFields": {
+            "type": "object",
+            "properties": {
+                field: REQUIREMENT_FIELD_VALUE_SCHEMA
+                for field in REQUIRED_BRIEF_FIELDS
+            },
+        },
+        "assistantReply": {
             "anyOf": [
                 {"type": "string"},
-                {"type": "number"},
-                {"type": "array", "items": {"type": "string"}},
+                {"type": "null"},
             ]
-        }
-        for field in REQUIRED_BRIEF_FIELDS
+        },
     },
+    "required": ["extractedFields", "assistantReply"],
 }
 
 FIELD_LABELS = {field.lower() for field in REQUIRED_BRIEF_FIELDS}
@@ -158,7 +172,7 @@ def _build_generation_config() -> dict[str, Any]:
     config: dict[str, Any] = {
         "temperature": 0,
         "max_output_tokens": int(
-            os.getenv("GEMINI_REQUIREMENTS_MAX_OUTPUT_TOKENS", "512")
+            os.getenv("GEMINI_REQUIREMENTS_MAX_OUTPUT_TOKENS", "1024")
         ),
     }
 
