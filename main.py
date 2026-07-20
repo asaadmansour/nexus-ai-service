@@ -9,6 +9,8 @@ from app.routers.grade_assessment import router as grade_assessment_router
 from app.routers.generate_embedding import router as generate_embedding_router
 from app.routers.generate_project_plan import router as generate_project_plan_router
 from app.routers.evaluate_planning_submission import router as evaluate_planning_submission_router
+from app.routers.generate_role_brief import router as generate_role_brief_router
+from app.routers.estimate_project_quote import router as estimate_project_quote_router
 
 
 app = FastAPI()
@@ -22,11 +24,13 @@ app.include_router(grade_assessment_router)
 app.include_router(generate_embedding_router)
 app.include_router(generate_project_plan_router)
 app.include_router(evaluate_planning_submission_router)
+app.include_router(generate_role_brief_router)
+app.include_router(estimate_project_quote_router)
 
 
 @app.get("/health")
 def health():
     return {
-    "status": "ok",
-    "service": "nexus-ai-service"
+        "status": "ok",
+        "service": "nexus-ai-service",
     }
