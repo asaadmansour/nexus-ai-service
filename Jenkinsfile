@@ -40,12 +40,11 @@ pipeline {
     }
   }
 
-  // Runs after every build (pass or fail): the image is in ECR now, so drop the
-  // local copy and any dangling layers to keep the Jenkins host's disk clean.
+  // Free disk space after every build (pass or fail)
   post {
     always {
       sh 'docker rmi $IMAGE || true'
-      sh 'docker image prune -f'
+      sh 'docker system prune -f'
     }
   }
 }
