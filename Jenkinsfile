@@ -1,6 +1,11 @@
 pipeline {
   agent any
 
+  // All 3 jobs share this lock, so builds run one at a time (needs the Lockable Resources plugin)
+  options {
+    lock('docker-build')
+  }
+
   environment {
     AWS_REGION   = 'us-east-1'
     ECR_REGISTRY = '389517403340.dkr.ecr.us-east-1.amazonaws.com' // AWS ACCOUNT_ID
