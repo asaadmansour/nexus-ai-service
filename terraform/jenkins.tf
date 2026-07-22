@@ -16,6 +16,20 @@ resource "aws_iam_role_policy_attachment" "jenkins_ecr" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser"
 }
 
+# Lets `aws eks update-kubeconfig` work (the Kubernetes-side admin rights come from eks.tf)
+resource "aws_iam_role_policy" "jenkins_eks_describe" {
+  name = "jenkins-eks-describe"
+  role = aws_iam_role.jenkins.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "eks:DescribeCluster"
+      Resource = "*"
+    }]
+  })
+}
+
 resource "aws_iam_instance_profile" "jenkins" {
   name = "jenkins-profile"
   role = aws_iam_role.jenkins.name
