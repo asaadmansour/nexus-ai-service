@@ -1,0 +1,44 @@
+---
+# Configure the Jenkins EC2 host: Java, Docker, Jenkins, kubectl, awscli
+- name: Set up Jenkins server
+  hosts: jenkins
+  become: true
+  tasks:
+    - name: Install base packages
+      apt:
+        name: [openjdk-17-jre, docker.io, git, unzip, awscli]
+        update_cache: true
+
+    - name: Add Jenkins apt key
+      apt_key:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+        state: present
+
+    - name: Add Jenkins apt repo
+      apt_repository:
+        repo: deb https://pkg.jenkins.io/debian-stable binary/
+        state: present
+
+    - name: Install Jenkins
+      apt:
+        name: jenkins
+        update_cache: true
+
+    - name: Let the jenkins user run docker
+      user:
+        name: jenkins
+        groups: docker
+        append: true
+
+    - name: Install kubectl
+      get_url:
+        url: https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl
+        dest: /usr/local/bin/kubectl
+        mode: "0755"
+
+    - name: Start and enable Docker and Jenkins
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop: [docker, jenkins]

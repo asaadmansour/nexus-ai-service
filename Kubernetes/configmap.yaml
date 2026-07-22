@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nexus-config
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  DATABASE_SSL: "false"
+  POSTGRES_USER: "nexus"
+  POSTGRES_DB: "nexus"
