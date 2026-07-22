@@ -6,18 +6,28 @@
   tasks:
     - name: Install base packages
       apt:
-        name: [openjdk-17-jre, docker.io, git, unzip, awscli]
+        name: [openjdk-21-jre-headless, docker.io, git, unzip, awscli, gnupg]
         update_cache: true
 
-    - name: Add Jenkins apt key
-      apt_key:
-        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
-        state: present
+    - name: Make Java 21 the default (Jenkins requires Java 21)
+      shell: update-alternatives --set java /usr/lib/jvm/java-21-openjdk-amd64/bin/java
 
-    - name: Add Jenkins apt repo
-      apt_repository:
-        repo: deb https://pkg.jenkins.io/debian-stable binary/
-        state: present
+    - name: Fetch the Jenkins signing key into a keyring
+      shell: >
+        gpg --batch --yes --no-default-keyring
+        --keyring /usr/share/keyrings/jenkins-keyring.gpg
+        --keyserver hkps://keyserver.ubuntu.com
+        --recv-keys 7198F4B714ABFC68
+
+    - name: Add Jenkins apt repo (single, clean entry)
+      copy:
+        dest: /etc/apt/sources.list.d/jenkins.list
+        content: "deb [signed-by=/usr/share/keyrings/jenkins-keyring.gpg] https://pkg.jenkins.io/debian-stable binary/\n"
+        mode: "0644"
+
+    - name: Update apt cache
+      apt:
+        update_cache: true
 
     - name: Install Jenkins
       apt:
