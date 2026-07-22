@@ -6,11 +6,30 @@
   tasks:
     - name: Install base packages
       apt:
-        name: [openjdk-21-jre-headless, docker.io, git, unzip, awscli, gnupg]
+        name: [openjdk-21-jre-headless, docker.io, git, unzip, gnupg]
         update_cache: true
 
     - name: Make Java 21 the default (Jenkins requires Java 21)
       shell: update-alternatives --set java /usr/lib/jvm/java-21-openjdk-amd64/bin/java
+
+    # The apt 'awscli' is v1 and writes a v1alpha1 kubeconfig that new kubectl rejects.
+    # AWS CLI v2 writes v1beta1, which kubectl 1.31 accepts.
+    - name: Download AWS CLI v2
+      get_url:
+        url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+        dest: /tmp/awscliv2.zip
+        mode: "0644"
+
+    - name: Unzip AWS CLI v2
+      unarchive:
+        src: /tmp/awscliv2.zip
+        dest: /tmp
+        remote_src: true
+
+    - name: Install AWS CLI v2
+      shell: /tmp/aws/install --update
+      args:
+        creates: /usr/local/bin/aws
 
     - name: Fetch the Jenkins signing key into a keyring
       shell: >
@@ -52,3 +71,11 @@
         state: started
         enabled: true
       loop: [docker, jenkins]
+
+    # Nightly cleanup so image/build-cache buildup never fills the disk again
+    - name: Schedule a daily Docker prune (3 AM)
+      cron:
+        name: docker-prune
+        hour: "3"
+        minute: "0"
+        job: "docker system prune -af >> /var/log/docker-prune.log 2>&1"

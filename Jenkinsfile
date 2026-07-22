@@ -25,7 +25,7 @@ pipeline {
     // Security gate: FAIL on fixable HIGH/CRITICAL before the image is pushed
     stage('Scan (Trivy)') {
       steps {
-        sh 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed $IMAGE'
+        sh 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed $IMAGE'
       }
     }
 

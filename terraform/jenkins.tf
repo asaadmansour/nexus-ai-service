@@ -81,5 +81,10 @@ resource "aws_instance" "jenkins" {
   key_name                    = var.key_name
   associate_public_ip_address = true
 
+  # Jenkins builds 3 images per run; the 8 GB AMI default fills up, so give it room
+  root_block_device {
+    volume_size = 30
+  }
+
   tags = { Name = "jenkins" }
 }
