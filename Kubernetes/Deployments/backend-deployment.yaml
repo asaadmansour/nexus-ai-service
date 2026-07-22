@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: backend
+  name: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - image: nexus-ai-backend:local
+        name: backend
+        envFrom:
+        - configMapRef:
+            name: nexus-config
+        - secretRef:
+            name: nexus-secret
+        ports:
+        - containerPort: 3000
