@@ -10,6 +10,18 @@ module "eks" {
 
   cluster_endpoint_public_access = true
 
+  # Let the Jenkins EC2 host reach the cluster API endpoint so `kubectl` can deploy
+  cluster_security_group_additional_rules = {
+    jenkins_api = {
+      description              = "Jenkins to EKS API server"
+      protocol                 = "tcp"
+      from_port                = 443
+      to_port                  = 443
+      type                     = "ingress"
+      source_security_group_id = aws_security_group.jenkins.id
+    }
+  }
+
   eks_managed_node_groups = {
     default = {
       instance_types = ["t3.small"]
