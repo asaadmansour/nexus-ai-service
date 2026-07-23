@@ -3,8 +3,20 @@ kind: ConfigMap
 metadata:
   name: nexus-config
 data:
+  # Non-secret production config (safe to commit). Real secrets live in nexus-secret, applied out-of-band.
   NODE_ENV: "production"
   PORT: "3000"
-  DATABASE_SSL: "false"
+  DATABASE_SSL: "true"
+  AI_SERVICE_URL: "http://ai-service:8000"
+  AI_SERVICE_TIMEOUT_MS: "6000000"
+  FRONTEND_URL: "https://nexus-ai-freelance.duckdns.org"
+  GOOGLE_CLIENT_ID: "854389428128-vbfi0vo7rok0e09o777j9nedm1icc23o.apps.googleusercontent.com"
+  GOOGLE_CALLBACK_URL: "https://nexus-ai-freelance.duckdns.org/api/auth/google/callback"
+  SMTP_HOST: "smtp.gmail.com"
+  SMTP_PORT: "587"
+  STRIPE_CONNECT_RETURN_URL: "https://nexus-ai-freelance.duckdns.org/payments/connect/return"
+  STRIPE_CONNECT_REFRESH_URL: "https://nexus-ai-freelance.duckdns.org/payments/connect/refresh"
+  STRIPE_PLATFORM_FEE_PERCENT: "10"
+  QUEUES_ENABLED: "true"
   POSTGRES_USER: "nexus"
   POSTGRES_DB: "nexus"

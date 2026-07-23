@@ -23,6 +23,10 @@ spec:
             name: nexus-config
         - secretRef:
             name: nexus-secret
+        env:
+        # EBS volumes mount with a lost+found dir, so init Postgres in a subdirectory
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
         ports:
         - containerPort: 5432
         volumeMounts:

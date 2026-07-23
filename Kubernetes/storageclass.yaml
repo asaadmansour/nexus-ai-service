@@ -1,0 +1,11 @@
+# Default storage class — the EBS CSI driver provisions a gp3 disk for any PVC (e.g. Postgres)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  type: gp3

@@ -22,6 +22,13 @@ module "eks" {
     }
   }
 
+  # Install the EBS CSI driver so pods can get persistent disks (Postgres needs one)
+  cluster_addons = {
+    aws-ebs-csi-driver = {
+      most_recent = true
+    }
+  }
+
   eks_managed_node_groups = {
     default = {
       instance_types = ["t3.small"]
@@ -29,6 +36,11 @@ module "eks" {
       min_size       = 1
       max_size       = 3
       desired_size   = 2
+
+      # Let the EBS CSI driver create/attach disks using the node role
+      iam_role_additional_policies = {
+        ebs_csi = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+      }
     }
   }
 

@@ -2,11 +2,17 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: nexus-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod" # cert-manager fills nexus-tls automatically
 spec:
   ingressClassName: nginx
-  # For the DuckDNS step later, add a host under rules:  host: yourname.duckdns.org
+  tls:
+  - hosts:
+    - nexus-ai-freelance.duckdns.org
+    secretName: nexus-tls
   rules:
-  - http:
+  - host: nexus-ai-freelance.duckdns.org
+    http:
       paths:
       # /api goes to the backend (it already serves under the /api prefix — no rewrite)
       - path: /api

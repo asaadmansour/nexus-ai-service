@@ -1,0 +1,15 @@
+# Issues free, auto-renewing TLS certs from Let's Encrypt via the nginx ingress (HTTP-01 challenge)
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: mohamed.kholy2011@gmail.com # cert-expiry notices go here — change if you like
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
