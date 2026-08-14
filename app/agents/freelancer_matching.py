@@ -96,20 +96,39 @@ class FreelancerCandidate(_Loose):
     yearsExperience: float | None = 0
     profileSummary: str | None = None             # short bio text
     embeddingSimilarity: float | None = None      # 0-1 "meaning" score, computed by the backend
+    activeTaskCount: int | None = None            # implementation tasks already assigned
+    activeProjectCount: int | None = None         # projects they are already working on
+
+
+# Implementation task being matched (only sent when targetType == "task").
+class TaskForMatching(_Loose):
+    id: str | None = None
+    title: str | None = None
+    description: str | None = None
+    roleKey: str | None = None
+    requiredSkills: list[str] = Field(default_factory=list)
+    estimatedHours: float | None = None
+    acceptanceCriteria: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
 
 
 class MatchFreelancersRequest(_Loose):
     matchingRunId: str                 # id of this run (echoed back so the backend can match it up)
-    targetRoleKey: str | None = None   # e.g. "architect" or "ui_ux"
+    targetType: str | None = None      # "planning_role" (default) or "task"
+    targetRoleKey: str | None = None   # e.g. "architect", "ui_ux", "frontend"
+    targetTaskId: str | None = None    # set when targetType == "task"
     limit: int | None = None           # how many top candidates to return
     project: ProjectForMatching = Field(default_factory=ProjectForMatching)
     brief: BriefForMatching | None = Field(default_factory=BriefForMatching)
+    task: TaskForMatching | None = None
     candidates: list[FreelancerCandidate] = Field(default_factory=list)
 
     # A method on the request: "which skills does this role need?"
     def required_skills(self) -> list[str]:
-        """Required skills from `project.requiredSkills`, else a delimited
-        `brief.requiredSkills` string."""
+        """Task skills win for task targets, then `project.requiredSkills`, else a
+        delimited `brief.requiredSkills` string."""
+        if self.task and self.task.requiredSkills:
+            return self.task.requiredSkills
         if self.project.requiredSkills:
             return self.project.requiredSkills
         raw = self.brief.requiredSkills if self.brief else None
@@ -190,9 +209,21 @@ class BM25:
 
 
 def _build_query(request: MatchFreelancersRequest) -> list[str]:
-    # The "query" = the project's words (what we're matching AGAINST).
+    # The "query" = the words we're matching candidates AGAINST.
     # Required skills are excluded on purpose: they're already scored by the
     # structured `skills` component, so including them here would count twice.
+    task = request.task
+    if task is not None:
+        # Task target: the task itself is the specific thing being staffed, so
+        # rank on its words instead of the whole (much broader) project brief.
+        parts = [
+            request.project.title or "",
+            task.title or "",
+            task.description or "",
+            *task.acceptanceCriteria,
+        ]
+        return _tokenize(" ".join(parts))
+
     brief = request.brief
     parts = [request.project.title or "", request.project.description or ""]
     if brief is not None:
@@ -373,6 +404,8 @@ def _score_candidate(cand: FreelancerCandidate, required: list[str], project_fit
         risk_flags.append("missing_required_skills")
     if cand.averageSkillScore is not None and cand.averageSkillScore < 3.0:
         risk_flags.append("low_assessment_score")
+    if (cand.activeTaskCount or 0) >= 3:
+        risk_flags.append("high_active_workload")
 
     # This dict is exactly what the backend stores and the UI shows.
     return {
@@ -387,6 +420,7 @@ def _score_candidate(cand: FreelancerCandidate, required: list[str], project_fit
             "hourlyRate": cand.hourlyRate,
             "availabilityHours": hours,
             "yearsExperience": cand.yearsExperience or 0,
+            "activeTaskCount": cand.activeTaskCount or 0,
         },
     }
 
@@ -425,9 +459,14 @@ def match_freelancers(request: MatchFreelancersRequest) -> dict[str, Any]:
 def _build_summary(ranked: list[dict[str, Any]], request: MatchFreelancersRequest) -> str:
     # One-line human summary shown at the top of the results.
     role = request.targetRoleKey or "role"
+    target = (
+        f'{role} candidates for "{request.task.title}"'
+        if request.task and request.task.title
+        else f"{role} candidates"
+    )
     count = len(ranked)
     if count == 0:
-        return f"No eligible {role} candidates were available to rank."
+        return f"No eligible {target} were available to rank."
 
     top = ranked[0]
     # Find the top candidate's name (the ranked dict only has the id, not the name).
@@ -435,8 +474,9 @@ def _build_summary(ranked: list[dict[str, Any]], request: MatchFreelancersReques
         (c.name for c in request.candidates if c.freelancerProfileId == top["freelancerProfileId"] and c.name),
         "the top candidate",
     )
+    relevance = "task" if request.task else "brief"
     return (
-        f"Ranked {count} approved {role} candidate{'s' if count != 1 else ''} by brief "
+        f"Ranked {count} approved {target} by {relevance} "
         f"relevance (vector + BM25 via reciprocal rank fusion), skills, availability, "
         f"experience, and rate fit. {top_name} leads with a score of {top['score']:g}."
     )
