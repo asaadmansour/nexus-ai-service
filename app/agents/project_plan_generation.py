@@ -41,8 +41,8 @@ class Milestone(BaseModel):
     description: str
     orderIndex: int
     startDay: int = Field(ge=0)
-    estimatedDays: int
-    budgetAmount: float
+    estimatedDays: int = Field(ge=1)
+    budgetAmount: float = Field(ge=0)
     currency: str
     acceptanceCriteria: List[str] = Field(default_factory=list)
 
@@ -53,9 +53,9 @@ class Task(BaseModel):
     title: str
     description: str
     priority: str
-    roleKey: str
-    requiredSkills: List[str] = Field(default_factory=list)
-    estimatedHours: int
+    roleKey: str = Field(min_length=1)
+    requiredSkills: List[str] = Field(min_length=1)
+    estimatedHours: int = Field(ge=1)
     orderIndex: int
     startDay: int = Field(ge=0)
     durationDays: int = Field(ge=1)
@@ -182,6 +182,19 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
                 f"Task '{task.clientKey}' has no integration checks."
             )
 
+    for milestone in plan.milestones:
+        if not milestone.acceptanceCriteria:
+            raise ProjectPlanGenerationError(
+                f"Milestone '{milestone.clientKey}' has no acceptance criteria."
+            )
+
+    planned_roles = {role.roleKey for role in plan.teamPlan.recommendedRoles}
+    missing_roles = sorted({task.roleKey for task in plan.tasks} - planned_roles)
+    if missing_roles:
+        raise ProjectPlanGenerationError(
+            f"Team plan is missing task roles: {', '.join(missing_roles)}."
+        )
+
     required_spec_sections = {
         "architecture": plan.projectSpec.architecture,
         "designSystem": plan.projectSpec.designSystem,
@@ -196,6 +209,8 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
         )
 
     all_task_keys = task_keys
+    tasks_by_key = {task.clientKey: task for task in plan.tasks}
+    dependency_pairs = set()
     for dep in plan.dependencies:
         if dep.taskClientKey not in all_task_keys:
             raise ProjectPlanGenerationError(
@@ -205,6 +220,21 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
             raise ProjectPlanGenerationError(
                 f"Dependency references unknown task '{dep.dependsOnTaskClientKey}'"
             )
+        pair = (dep.taskClientKey, dep.dependsOnTaskClientKey, dep.dependencyType)
+        if pair in dependency_pairs:
+            raise ProjectPlanGenerationError(
+                f"Duplicate dependency found for task '{dep.taskClientKey}'."
+            )
+        dependency_pairs.add(pair)
+        if dep.dependencyType in {"blocks", "after"}:
+            task = tasks_by_key[dep.taskClientKey]
+            prerequisite = tasks_by_key[dep.dependsOnTaskClientKey]
+            prerequisite_end = prerequisite.startDay + prerequisite.durationDays
+            if task.startDay < prerequisite_end:
+                raise ProjectPlanGenerationError(
+                    f"Task '{task.clientKey}' starts before blocking dependency "
+                    f"'{prerequisite.clientKey}' finishes."
+                )
 
     # Detect cycles
     graph = {key: [] for key in all_task_keys}
@@ -248,7 +278,7 @@ def generate_project_plan(request: ProjectPlanRequest) -> Dict[str, Any]:
             raise ProjectPlanGenerationError("Empty response from AI.")
         result = json.loads(response.text)
         validated_plan = validate_and_normalize_plan(result)
-        return validated_plan.dict()
+        return validated_plan.model_dump()
 
     except ProjectPlanGenerationError:
         raise

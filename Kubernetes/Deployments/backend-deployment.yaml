@@ -14,6 +14,15 @@ spec:
       labels:
         app: backend
     spec:
+      initContainers:
+      - image: nexus-ai-backend:local
+        name: migrate
+        command: ["node", "./node_modules/typeorm/cli.js", "migration:run", "-d", "dist/database/data-source.js"]
+        envFrom:
+        - configMapRef:
+            name: nexus-config
+        - secretRef:
+            name: nexus-secret
       containers:
       - image: nexus-ai-backend:local
         name: backend
@@ -24,3 +33,15 @@ spec:
             name: nexus-secret
         ports:
         - containerPort: 3000
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /api/health/live
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 20

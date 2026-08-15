@@ -14,11 +14,15 @@ pipeline {
   }
 
   stages {
-    // No unit tests in this repo yet; add a Test stage here when they exist.
-
     stage('Build image') {
       steps {
         sh 'docker build -t $IMAGE .'
+      }
+    }
+
+    stage('Test') {
+      steps {
+        sh 'docker run --rm $IMAGE python -m unittest discover -s tests -v'
       }
     }
 
@@ -32,8 +36,10 @@ pipeline {
     stage('Deploy to EKS') {
       steps {
         sh 'aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER'
-        // First run: kubectl apply the Kubernetes/ manifests. After that, just swap the image tag:
+        sh 'kubectl apply -f Kubernetes/configmap.yaml'
+        sh 'kubectl apply -f Kubernetes/Deployments/ai-service-deployment.yaml'
         sh 'kubectl set image deployment/ai-service ai-service=$IMAGE'
+        sh 'kubectl rollout status deployment/ai-service --timeout=5m'
       }
     }
   }

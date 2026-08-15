@@ -17,7 +17,14 @@ GENAI_TIMEOUT = 60.0
 
 # Evidence types the model cannot verify on its own (no repo clone / render),
 # so a positive AI result on these should still be confirmed by a human.
-HUMAN_REVIEW_EVIDENCE_TYPES = {"figma", "zip", "other"}
+HUMAN_REVIEW_EVIDENCE_TYPES = {
+    "pdf",
+    "repo",
+    "pull_request",
+    "figma",
+    "zip",
+    "other",
+}
 
 
 class SubmissionEvaluationError(RuntimeError):
@@ -79,7 +86,7 @@ def _normalize(
     validated: SubmissionEvaluationResponse, request: Dict[str, Any]
 ) -> Dict[str, Any]:
     """Clamp/derive fields so the backend can trust the shape regardless of model drift."""
-    data = validated.dict()
+    data = validated.model_dump()
     data["score"] = max(0, min(100, int(data.get("score", 0))))
 
     submission = request.get("submission") or {}
@@ -88,6 +95,41 @@ def _normalize(
     # Evidence the model cannot verify itself always needs a human confirm.
     if submission_type in HUMAN_REVIEW_EVIDENCE_TYPES:
         data["requiresHumanReview"] = True
+
+    task = request.get("task") or {}
+    criteria = _dedupe_strings(
+        list(task.get("acceptanceCriteria") or [])
+        + list(task.get("deliverables") or [])
+    )
+    returned = {
+        str(item.get("criterion", "")).strip(): item
+        for item in data.get("rubric", [])
+        if str(item.get("criterion", "")).strip()
+    }
+    if criteria:
+        data["rubric"] = [
+            returned.get(criterion)
+            or {
+                "criterion": criterion,
+                "met": False,
+                "evidence": "The evaluation returned no evidence for this criterion.",
+            }
+            for criterion in criteria
+        ]
+    else:
+        data["rubric"] = [
+            {
+                "criterion": "Task acceptance criteria are defined",
+                "met": False,
+                "evidence": "The task has no acceptance criteria or deliverables to evaluate.",
+            }
+        ]
+        data["requiresHumanReview"] = True
+
+    unmet = [item for item in data["rubric"] if not item.get("met")]
+    if unmet:
+        data["passed"] = False
+        data["score"] = min(data["score"], 69)
 
     # A failed evaluation must request a revision; a pass must not.
     if not data["passed"]:
@@ -101,6 +143,12 @@ def _normalize(
             "unmet rubric items and resubmit."
         )
     return data
+
+
+def _dedupe_strings(values: List[Any]) -> List[str]:
+    return list(
+        dict.fromkeys(str(value).strip() for value in values if str(value).strip())
+    )
 
 
 def _build_prompt(request: Dict[str, Any]) -> str:
@@ -125,8 +173,8 @@ Evidence handling by submissionType:
 - "pdf" / "figma" / "zip": you cannot open the file. Evaluate from notes/text only
   and set requiresHumanReview to true.
 
-For every acceptance criterion produce one rubric entry:
-- criterion: the criterion text
+For every acceptance criterion and deliverable produce one rubric entry:
+- criterion: copy the input text exactly
 - met: true only if there is concrete evidence it is satisfied
 - evidence: one short sentence citing the evidence (or why it is unverifiable)
 
