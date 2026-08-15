@@ -33,11 +33,16 @@ app.include_router(estimate_project_quote_router)
 
 @app.get("/health")
 def health():
-    configured = is_ai_provider_configured()
+    checks = {
+        "gemini": is_ai_provider_configured(),
+        "figma": is_figma_provider_configured(),
+    }
+    configured = all(checks.values())
     payload = {
         "status": "ok" if configured else "degraded",
         "service": "nexus-ai-service",
         "aiProviderConfigured": configured,
+        "checks": checks,
     }
     return payload if configured else JSONResponse(status_code=503, content=payload)
 
@@ -50,3 +55,8 @@ def liveness():
 def is_ai_provider_configured() -> bool:
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     return bool(api_key and api_key != "change-me")
+
+
+def is_figma_provider_configured() -> bool:
+    token = os.getenv("FIGMA_ACCESS_TOKEN", "").strip()
+    return bool(token and token != "change-me")

@@ -36,6 +36,8 @@ pipeline {
     stage('Deploy to EKS') {
       steps {
         sh 'aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER'
+        sh 'kubectl apply -f Kubernetes/evaluation-sandbox-rbac.yaml'
+        sh 'kubectl apply -f Kubernetes/evaluation-sandbox-networkpolicy.yaml'
         sh 'kubectl apply -f Kubernetes/configmap.yaml'
         sh 'kubectl apply -f Kubernetes/Deployments/ai-service-deployment.yaml'
         sh 'kubectl set image deployment/ai-service ai-service=$IMAGE'

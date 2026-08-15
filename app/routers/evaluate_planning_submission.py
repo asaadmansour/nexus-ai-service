@@ -23,6 +23,7 @@ class PlanningRequirement(BaseModel):
 
 class SubmissionInput(BaseModel):
     submissionId: str
+    submissionVersion: int = Field(ge=1)
     submissionType: Literal["architecture", "ui_ux"]
     title: Optional[str] = None
     summary: Optional[str] = None
@@ -36,6 +37,7 @@ class EvaluateSubmissionRequest(BaseModel):
     requirements: List[PlanningRequirement]
     submission: SubmissionInput
     approvedArchitecture: Optional[Dict[str, Any]] = None
+    previousVerdict: Optional[Dict[str, Any]] = None
 
 
 @router.post("/evaluate-planning-submission")
