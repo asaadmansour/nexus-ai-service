@@ -27,6 +27,12 @@ class PlanningSubmissionEvaluationError(RuntimeError):
     """Raised when the AI provider or response validation fails."""
 
 
+class ArtifactCitation(BaseModel):
+    artifactId: str
+    location: str
+    finding: str
+
+
 class RequirementCheck(BaseModel):
     key: str
     title: str
@@ -35,7 +41,7 @@ class RequirementCheck(BaseModel):
     severity: Literal["info", "minor", "major", "blocker"]
     evidence: str
     feedback: str
-    citations: List[Dict[str, str]] = Field(default_factory=list)
+    citations: List[ArtifactCitation] = Field(default_factory=list)
 
 
 class VerdictIssue(BaseModel):
@@ -43,7 +49,7 @@ class VerdictIssue(BaseModel):
     criterionKey: str
     severity: Literal["minor", "major", "blocker"]
     message: str
-    citations: List[Dict[str, str]] = Field(default_factory=list)
+    citations: List[ArtifactCitation] = Field(default_factory=list)
 
 
 class ModelEvaluationResponse(BaseModel):

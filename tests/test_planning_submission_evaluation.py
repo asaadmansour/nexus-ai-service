@@ -1,8 +1,10 @@
+import json
 import unittest
 from copy import deepcopy
 from unittest.mock import patch
 
 from app.agents.planning_submission_evaluation import (
+    ModelEvaluationResponse,
     PROMPT_VERSION,
     _context_hash,
     _evaluation_input_hash,
@@ -20,6 +22,11 @@ from app.runners.planning_evaluation import _summary
 
 
 class PlanningSubmissionEvaluationTests(unittest.TestCase):
+    def test_gemini_response_schema_has_no_open_dictionary_fields(self):
+        schema = ModelEvaluationResponse.model_json_schema()
+
+        self.assertNotIn("additionalProperties", json.dumps(schema))
+
     def test_missing_mandatory_artifact_forces_revision(self):
         request = {
             "submission": {
