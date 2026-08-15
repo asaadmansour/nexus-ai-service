@@ -1,11 +1,18 @@
-from typing import Any, Literal
+import logging
+from typing import Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.agents.submission_evaluation import (
+    SubmissionEvaluationError,
+    evaluate_submission as evaluate_submission_agent,
+)
 from app.routers.shared_models import ProjectSpec
 
 router = APIRouter(prefix="/agents", tags=["Evaluation Agent"])
+
+logger = logging.getLogger(__name__)
 
 
 class ProjectForEvaluation(BaseModel):
@@ -54,32 +61,19 @@ class EvaluateSubmissionRequest(BaseModel):
 
 @router.post("/evaluate-submission")
 def evaluate_submission(request: EvaluateSubmissionRequest):
-    criteria = request.task.acceptance_criteria or [
-        "Submission addresses the requested task.",
-        "Submission includes enough evidence for review.",
-    ]
+    try:
+        return evaluate_submission_agent(request.model_dump(by_alias=True))
 
-    rubric = [
-        {
-            "criterion": criterion,
-            "met": index == 0,
-            "evidence": (
-                "Mock evidence found in submitted artifact."
-                if index == 0
-                else "Mock review says this item still needs verification."
-            ),
-        }
-        for index, criterion in enumerate(criteria[:5])
-    ]
+    except SubmissionEvaluationError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=str(e),
+            headers={"Retry-After": "30"},
+        ) from e
 
-    return {
-        "passed": False,
-        "score": 2,
-        "revisionRequested": True,
-        "revisionNotes": (
-            "Mock evaluation: the submission has a useful starting point, but one or "
-            "more acceptance criteria still need stronger evidence."
-        ),
-        "requiresHumanReview": request.submission.submission_type in {"figma", "other"},
-        "rubric": rubric,
-    }
+    except Exception as exc:
+        logger.exception("Submission evaluation failed.")
+        raise HTTPException(
+            status_code=503,
+            detail="Submission evaluation is temporarily unavailable.",
+        ) from exc
