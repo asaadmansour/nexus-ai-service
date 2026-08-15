@@ -1,4 +1,7 @@
+import os
+
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from app.routers.evaluation_agent import router as evaluation_agent_router
 from app.routers.generate_task import router as generate_task_router
 from app.routers.matching_agent import router as matching_agent_router
@@ -30,7 +33,30 @@ app.include_router(estimate_project_quote_router)
 
 @app.get("/health")
 def health():
-    return {
-        "status": "ok",
-        "service": "nexus-ai-service",
+    checks = {
+        "gemini": is_ai_provider_configured(),
+        "figma": is_figma_provider_configured(),
     }
+    configured = all(checks.values())
+    payload = {
+        "status": "ok" if configured else "degraded",
+        "service": "nexus-ai-service",
+        "aiProviderConfigured": configured,
+        "checks": checks,
+    }
+    return payload if configured else JSONResponse(status_code=503, content=payload)
+
+
+@app.get("/health/live")
+def liveness():
+    return {"status": "ok", "service": "nexus-ai-service"}
+
+
+def is_ai_provider_configured() -> bool:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    return bool(api_key and api_key != "change-me")
+
+
+def is_figma_provider_configured() -> bool:
+    token = os.getenv("FIGMA_ACCESS_TOKEN", "").strip()
+    return bool(token and token != "change-me")

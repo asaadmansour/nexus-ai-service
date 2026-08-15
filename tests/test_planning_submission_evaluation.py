@@ -1,0 +1,323 @@
+import unittest
+from copy import deepcopy
+from unittest.mock import patch
+
+from app.agents.planning_submission_evaluation import (
+    PROMPT_VERSION,
+    _context_hash,
+    _evaluation_input_hash,
+    _normalize_evaluation,
+    _validate_request_contract,
+    evaluate_submission,
+)
+from app.agents.planning_artifacts import (
+    ArtifactInspectionError,
+    MAX_FIGMA_STRUCTURE_FRAMES,
+    _figma_structure,
+    _validate_public_https_url,
+)
+from app.runners.planning_evaluation import _summary
+
+
+class PlanningSubmissionEvaluationTests(unittest.TestCase):
+    def test_missing_mandatory_artifact_forces_revision(self):
+        request = {
+            "submission": {
+                "submissionType": "architecture",
+                "content": {
+                    "requirementEvidence": {
+                        "system_context": {"summary": "Users and boundaries", "urls": []}
+                    }
+                },
+            },
+            "requirements": [
+                {
+                    "key": "system_context",
+                    "title": "System context",
+                    "mandatory": True,
+                    "requiresUrl": False,
+                },
+                {
+                    "key": "architecture_diagram",
+                    "title": "Architecture diagram",
+                    "mandatory": True,
+                    "requiresUrl": True,
+                },
+            ],
+        }
+        raw = {
+            "score": 98,
+            "recommendation": "approve",
+            "checks": [
+                {
+                    "key": "system_context",
+                    "status": "met",
+                    "severity": "info",
+                    "evidence": "Users and boundaries",
+                    "feedback": "Complete",
+                }
+            ],
+        }
+
+        result = _normalize_evaluation(request, raw)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.recommendation, "changes_requested")
+        self.assertEqual(result.score, 69)
+        self.assertEqual(result.checks[1].status, "missing")
+        self.assertTrue(result.revisionItems)
+
+    def test_uiux_requires_approved_architecture(self):
+        with self.assertRaisesRegex(ValueError, "approved architecture"):
+            _validate_request_contract(
+                {
+                    "submission": {"submissionType": "ui_ux"},
+                    "requirements": [{"key": "wireframes"}],
+                }
+            )
+
+    def test_required_artifact_needs_a_real_citation(self):
+        request = {
+            "submission": {
+                "submissionType": "architecture",
+                "content": {
+                    "requirementEvidence": {
+                        "diagram": {
+                            "summary": "Diagram supplied",
+                            "urls": ["https://example.com/diagram.pdf"],
+                        }
+                    }
+                },
+            },
+            "requirements": [
+                {
+                    "key": "diagram",
+                    "title": "Diagram",
+                    "mandatory": True,
+                    "requiresUrl": True,
+                }
+            ],
+        }
+        manifest = {
+            "manifestHash": "manifest",
+            "artifacts": [
+                {
+                    "id": "artifact-1",
+                    "status": "inspected",
+                    "requirementKeys": ["diagram"],
+                }
+            ],
+        }
+        raw = {
+            "score": 95,
+            "recommendation": "approve",
+            "checks": [
+                {
+                    "key": "diagram",
+                    "status": "met",
+                    "severity": "info",
+                    "evidence": "Diagram supplied",
+                    "feedback": "Complete",
+                    "citations": [],
+                }
+            ],
+        }
+
+        result = _normalize_evaluation(request, raw, manifest=manifest)
+
+        self.assertEqual(result.checks[0].status, "partial")
+        self.assertEqual(result.checks[0].severity, "blocker")
+        self.assertFalse(result.passed)
+
+    def test_identical_snapshot_reuses_previous_verdict(self):
+        request = {
+            "project": {"id": "project"},
+            "brief": {},
+            "submission": {
+                "submissionId": "new-version",
+                "submissionVersion": 2,
+                "submissionType": "architecture",
+                "content": {
+                    "requirementEvidence": {
+                        "context": {"summary": "Defined", "urls": []}
+                    }
+                },
+                "fileUrls": {},
+            },
+            "requirements": [
+                {
+                    "key": "context",
+                    "title": "Context",
+                    "mandatory": True,
+                    "requiresUrl": False,
+                }
+            ],
+        }
+        previous_request = deepcopy(request)
+        previous_request["submission"]["submissionId"] = "old-version"
+        previous_request["submission"]["submissionVersion"] = 1
+        manifest = {"manifestHash": "same", "artifacts": [], "totalBytes": 0}
+        context_hash = _context_hash(previous_request)
+        self.assertEqual(context_hash, _context_hash(request))
+        input_hash = _evaluation_input_hash(context_hash, manifest)
+        previous = _normalize_evaluation(
+            previous_request,
+            {
+                "score": 90,
+                "recommendation": "approve",
+                "checks": [
+                    {
+                        "key": "context",
+                        "status": "met",
+                        "severity": "info",
+                        "evidence": "Defined",
+                        "feedback": "Complete",
+                    }
+                ],
+            },
+            manifest=manifest,
+            evaluation_input_hash=input_hash,
+            context_hash=context_hash,
+            model_name="model",
+        ).model_dump()
+        previous["promptVersion"] = PROMPT_VERSION
+        request["previousVerdict"] = previous
+
+        with patch(
+            "app.agents.planning_submission_evaluation.inspect_artifacts",
+            return_value=(manifest, [], ""),
+        ):
+            result = evaluate_submission(request)
+
+        self.assertTrue(result["reused"])
+        self.assertEqual(result["evaluationInputHash"], input_hash)
+
+    def test_citation_must_belong_to_the_requirement(self):
+        request = {
+            "submission": {
+                "submissionType": "architecture",
+                "content": {
+                    "requirementEvidence": {
+                        "diagram": {
+                            "summary": "Diagram supplied",
+                            "urls": ["https://example.com/diagram.pdf"],
+                        }
+                    }
+                },
+            },
+            "requirements": [
+                {
+                    "key": "diagram",
+                    "title": "Diagram",
+                    "mandatory": True,
+                    "requiresUrl": True,
+                }
+            ],
+        }
+        manifest = {
+            "manifestHash": "manifest",
+            "artifacts": [
+                {
+                    "id": "artifact-diagram",
+                    "status": "inspected",
+                    "requirementKeys": ["diagram"],
+                },
+                {
+                    "id": "artifact-unrelated",
+                    "status": "inspected",
+                    "requirementKeys": ["data_model"],
+                },
+            ],
+        }
+        raw = {
+            "score": 95,
+            "recommendation": "approve",
+            "checks": [
+                {
+                    "key": "diagram",
+                    "status": "met",
+                    "severity": "info",
+                    "evidence": "Diagram supplied",
+                    "feedback": "Complete",
+                    "citations": [
+                        {
+                            "artifactId": "artifact-unrelated",
+                            "location": "page 1",
+                            "finding": "Unrelated evidence",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        result = _normalize_evaluation(request, raw, manifest=manifest)
+
+        self.assertEqual(result.checks[0].status, "partial")
+        self.assertEqual(result.checks[0].citations, [])
+        self.assertFalse(result.passed)
+
+    def test_private_network_artifact_is_rejected(self):
+        with self.assertRaises(ArtifactInspectionError):
+            _validate_public_https_url("https://127.0.0.1/private.pdf")
+
+    def test_large_figma_structure_is_bounded(self):
+        frames = [
+            {"id": str(index), "name": f"Frame {index}", "type": "FRAME"}
+            for index in range(MAX_FIGMA_STRUCTURE_FRAMES + 1)
+        ]
+        structure = _figma_structure(
+            {
+                "document": {
+                    "id": "root",
+                    "name": "Document",
+                    "type": "DOCUMENT",
+                    "children": [
+                        {
+                            "id": "page",
+                            "name": "Page",
+                            "type": "CANVAS",
+                            "children": frames,
+                        }
+                    ],
+                }
+            }
+        )
+
+        self.assertEqual(len(structure["frames"]), MAX_FIGMA_STRUCTURE_FRAMES)
+        self.assertEqual(structure["frameCount"], MAX_FIGMA_STRUCTURE_FRAMES + 1)
+        self.assertTrue(structure["structureTruncated"])
+
+    def test_sandbox_summary_keeps_prior_and_current_verdicts(self):
+        summary = _summary(
+            {
+                "recommendation": "changes_requested",
+                "score": 60,
+                "evaluationInputHash": "old-hash",
+                "summary": "Prior review",
+                "openIssues": [
+                    {
+                        "criterionKey": "api_contracts",
+                        "message": "Document response schemas",
+                    }
+                ],
+            },
+            {
+                "recommendation": "approve",
+                "score": 91,
+                "evaluationInputHash": "new-hash",
+                "summary": "Current review",
+                "openIssues": [],
+                "resolvedIssues": ["planning-issue"],
+                "regressions": [],
+                "reused": False,
+            },
+        )
+
+        self.assertIn("## Prior verdict", summary)
+        self.assertIn("Document response schemas", summary)
+        self.assertIn("## Current verdict", summary)
+        self.assertIn("planning-issue", summary)
+
+
+if __name__ == "__main__":
+    unittest.main()

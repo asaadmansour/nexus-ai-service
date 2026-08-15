@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class ProjectInfo(BaseModel):
     id: str
     title: str
-    description: str
+    description: Optional[str] = None
     status: str
     budgetMin: float
     budgetMax: float
@@ -44,8 +44,9 @@ class BriefInfo(BaseModel):
 
 class SubmissionInfo(BaseModel):
     id: str
-    summary: str
+    summary: Optional[str] = None
     content: Dict[str, Any]
+    fileUrls: Dict[str, Any] = Field(default_factory=dict)
 
 
 class PlanningTeamMember(BaseModel):
@@ -75,11 +76,11 @@ def generate_project_plan_route(request: GeneratePlanRequest):
         # Convert request to the agent's input model
         input_data = ProjectPlanRequest(
             projectPlanJobId=request.projectPlanJobId,
-            project=request.project.dict(),
-            brief=request.brief.dict(),
-            architectureSubmission=request.architectureSubmission.dict(),
-            uiuxSubmission=request.uiuxSubmission.dict(),
-            planningTeam=[m.dict() for m in request.planningTeam],
+            project=request.project.model_dump(),
+            brief=request.brief.model_dump(),
+            architectureSubmission=request.architectureSubmission.model_dump(),
+            uiuxSubmission=request.uiuxSubmission.model_dump(),
+            planningTeam=[m.model_dump() for m in request.planningTeam],
         )
 
         result = generate_project_plan(input_data)

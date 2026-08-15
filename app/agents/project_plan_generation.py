@@ -40,8 +40,9 @@ class Milestone(BaseModel):
     title: str
     description: str
     orderIndex: int
-    estimatedDays: int
-    budgetAmount: float
+    startDay: int = Field(ge=0)
+    estimatedDays: int = Field(ge=1)
+    budgetAmount: float = Field(ge=0)
     currency: str
     acceptanceCriteria: List[str] = Field(default_factory=list)
 
@@ -52,11 +53,16 @@ class Task(BaseModel):
     title: str
     description: str
     priority: str
-    roleKey: str
-    requiredSkills: List[str] = Field(default_factory=list)
-    estimatedHours: int
+    roleKey: str = Field(min_length=1)
+    requiredSkills: List[str] = Field(min_length=1)
+    estimatedHours: int = Field(ge=1)
     orderIndex: int
+    startDay: int = Field(ge=0)
+    durationDays: int = Field(ge=1)
     acceptanceCriteria: List[str] = Field(default_factory=list)
+    contractReferences: List[str] = Field(default_factory=list)
+    ownedPaths: List[str] = Field(default_factory=list)
+    integrationChecks: List[str] = Field(default_factory=list)
     status: Optional[str] = "todo"
 
     @validator('priority')
@@ -151,14 +157,60 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
         raise ProjectPlanGenerationError("Duplicate milestone clientKey found.")
     if len(task_keys) != len(plan.tasks):
         raise ProjectPlanGenerationError("Duplicate task clientKey found.")
+    if not plan.milestones or not plan.tasks:
+        raise ProjectPlanGenerationError("Plan must include milestones and implementation tasks.")
 
     for task in plan.tasks:
         if task.milestoneClientKey not in milestone_keys:
             raise ProjectPlanGenerationError(
                 f"Task '{task.clientKey}' references non-existent milestone '{task.milestoneClientKey}'"
             )
+        if not task.acceptanceCriteria:
+            raise ProjectPlanGenerationError(
+                f"Task '{task.clientKey}' has no acceptance criteria."
+            )
+        if not task.contractReferences:
+            raise ProjectPlanGenerationError(
+                f"Task '{task.clientKey}' has no approved contract references."
+            )
+        if not task.ownedPaths:
+            raise ProjectPlanGenerationError(
+                f"Task '{task.clientKey}' has no ownership boundary."
+            )
+        if not task.integrationChecks:
+            raise ProjectPlanGenerationError(
+                f"Task '{task.clientKey}' has no integration checks."
+            )
+
+    for milestone in plan.milestones:
+        if not milestone.acceptanceCriteria:
+            raise ProjectPlanGenerationError(
+                f"Milestone '{milestone.clientKey}' has no acceptance criteria."
+            )
+
+    planned_roles = {role.roleKey for role in plan.teamPlan.recommendedRoles}
+    missing_roles = sorted({task.roleKey for task in plan.tasks} - planned_roles)
+    if missing_roles:
+        raise ProjectPlanGenerationError(
+            f"Team plan is missing task roles: {', '.join(missing_roles)}."
+        )
+
+    required_spec_sections = {
+        "architecture": plan.projectSpec.architecture,
+        "designSystem": plan.projectSpec.designSystem,
+        "apiContract": plan.projectSpec.apiContract,
+        "dataModel": plan.projectSpec.dataModel,
+        "conventions": plan.projectSpec.conventions,
+    }
+    empty_sections = [name for name, value in required_spec_sections.items() if not value]
+    if empty_sections:
+        raise ProjectPlanGenerationError(
+            f"Project specification is missing: {', '.join(empty_sections)}."
+        )
 
     all_task_keys = task_keys
+    tasks_by_key = {task.clientKey: task for task in plan.tasks}
+    dependency_pairs = set()
     for dep in plan.dependencies:
         if dep.taskClientKey not in all_task_keys:
             raise ProjectPlanGenerationError(
@@ -168,6 +220,21 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
             raise ProjectPlanGenerationError(
                 f"Dependency references unknown task '{dep.dependsOnTaskClientKey}'"
             )
+        pair = (dep.taskClientKey, dep.dependsOnTaskClientKey, dep.dependencyType)
+        if pair in dependency_pairs:
+            raise ProjectPlanGenerationError(
+                f"Duplicate dependency found for task '{dep.taskClientKey}'."
+            )
+        dependency_pairs.add(pair)
+        if dep.dependencyType in {"blocks", "after"}:
+            task = tasks_by_key[dep.taskClientKey]
+            prerequisite = tasks_by_key[dep.dependsOnTaskClientKey]
+            prerequisite_end = prerequisite.startDay + prerequisite.durationDays
+            if task.startDay < prerequisite_end:
+                raise ProjectPlanGenerationError(
+                    f"Task '{task.clientKey}' starts before blocking dependency "
+                    f"'{prerequisite.clientKey}' finishes."
+                )
 
     # Detect cycles
     graph = {key: [] for key in all_task_keys}
@@ -211,7 +278,7 @@ def generate_project_plan(request: ProjectPlanRequest) -> Dict[str, Any]:
             raise ProjectPlanGenerationError("Empty response from AI.")
         result = json.loads(response.text)
         validated_plan = validate_and_normalize_plan(result)
-        return validated_plan.dict()
+        return validated_plan.model_dump()
 
     except ProjectPlanGenerationError:
         raise
@@ -270,6 +337,18 @@ Important rules:
 - Use only these task status values: todo, blocked, in_progress, review, changes_requested, done, cancelled (set default to "todo").
 - Use only these dependency types: blocks, related, after (prefer "blocks").
 - Every task must reference an existing milestone via `milestoneClientKey`.
+- Provide a dependency-aware Gantt schedule using zero-based `startDay` and positive
+  `durationDays` for every task, and `startDay` plus `estimatedDays` for every milestone.
+- Treat the approved architecture and UI/UX submissions as binding contracts. Never invent
+  an endpoint, field, role, state, or component that conflicts with them.
+- Every implementation task must include concrete `contractReferences` pointing to the
+  relevant API/design/data evidence, `ownedPaths` that establish non-overlapping code
+  ownership where possible, and `integrationChecks` that another freelancer can run.
+- Split tasks so freelancers can work in parallel against the approved contracts. Add a
+  dependency only when work truly cannot begin independently.
+- The project specification must preserve the approved architecture, design system, API
+  contract, data model, and conventions in implementation-ready detail; do not replace
+  them with generic summaries.
 - Every dependency must reference existing task `clientKey`s.
 - All `clientKey` values must be unique across milestones and tasks.
 - Do not create circular dependencies.

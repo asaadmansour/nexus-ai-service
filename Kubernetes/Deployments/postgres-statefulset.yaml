@@ -16,7 +16,8 @@ spec:
         app: postgres
     spec:
       containers:
-      - image: postgres:15-alpine
+      # Built by the backend pipeline with pgvector required by the schema.
+      - image: nexus-ai-postgres:local
         name: postgres
         envFrom:
         - configMapRef:
