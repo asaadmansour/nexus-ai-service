@@ -1,5 +1,5 @@
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -8,7 +8,6 @@ from app.agents.submission_evaluation import (
     SubmissionEvaluationError,
     evaluate_submission as evaluate_submission_agent,
 )
-from app.routers.shared_models import ProjectSpec
 
 router = APIRouter(prefix="/agents", tags=["Evaluation Agent"])
 
@@ -31,7 +30,7 @@ class BriefForEvaluation(BaseModel):
 class TaskForEvaluation(BaseModel):
     task_id: str = Field(alias="taskId")
     title: str
-    description: str
+    description: str | None = None
     is_spec_task: bool = Field(default=False, alias="isSpecTask")
     deliverables: list[str] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list, alias="acceptanceCriteria")
@@ -56,7 +55,9 @@ class EvaluateSubmissionRequest(BaseModel):
     task: TaskForEvaluation
     submission: SubmissionForEvaluation
     brief: BriefForEvaluation | None = None
-    project_spec: ProjectSpec | None = Field(default=None, alias="projectSpec")
+    # Loose dict so the full spec (architecture/designSystem/dataModel/...) reaches
+    # the prompt instead of being stripped to a fixed shared-model shape.
+    project_spec: dict[str, Any] | None = Field(default=None, alias="projectSpec")
 
 
 @router.post("/evaluate-submission")
