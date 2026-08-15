@@ -46,6 +46,7 @@ class SubmissionInfo(BaseModel):
     id: str
     summary: str
     content: Dict[str, Any]
+    fileUrls: Dict[str, Any] = Field(default_factory=dict)
 
 
 class PlanningTeamMember(BaseModel):

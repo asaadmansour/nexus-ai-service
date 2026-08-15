@@ -40,6 +40,7 @@ class Milestone(BaseModel):
     title: str
     description: str
     orderIndex: int
+    startDay: int = Field(ge=0)
     estimatedDays: int
     budgetAmount: float
     currency: str
@@ -56,7 +57,12 @@ class Task(BaseModel):
     requiredSkills: List[str] = Field(default_factory=list)
     estimatedHours: int
     orderIndex: int
+    startDay: int = Field(ge=0)
+    durationDays: int = Field(ge=1)
     acceptanceCriteria: List[str] = Field(default_factory=list)
+    contractReferences: List[str] = Field(default_factory=list)
+    ownedPaths: List[str] = Field(default_factory=list)
+    integrationChecks: List[str] = Field(default_factory=list)
     status: Optional[str] = "todo"
 
     @validator('priority')
@@ -151,12 +157,43 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
         raise ProjectPlanGenerationError("Duplicate milestone clientKey found.")
     if len(task_keys) != len(plan.tasks):
         raise ProjectPlanGenerationError("Duplicate task clientKey found.")
+    if not plan.milestones or not plan.tasks:
+        raise ProjectPlanGenerationError("Plan must include milestones and implementation tasks.")
 
     for task in plan.tasks:
         if task.milestoneClientKey not in milestone_keys:
             raise ProjectPlanGenerationError(
                 f"Task '{task.clientKey}' references non-existent milestone '{task.milestoneClientKey}'"
             )
+        if not task.acceptanceCriteria:
+            raise ProjectPlanGenerationError(
+                f"Task '{task.clientKey}' has no acceptance criteria."
+            )
+        if not task.contractReferences:
+            raise ProjectPlanGenerationError(
+                f"Task '{task.clientKey}' has no approved contract references."
+            )
+        if not task.ownedPaths:
+            raise ProjectPlanGenerationError(
+                f"Task '{task.clientKey}' has no ownership boundary."
+            )
+        if not task.integrationChecks:
+            raise ProjectPlanGenerationError(
+                f"Task '{task.clientKey}' has no integration checks."
+            )
+
+    required_spec_sections = {
+        "architecture": plan.projectSpec.architecture,
+        "designSystem": plan.projectSpec.designSystem,
+        "apiContract": plan.projectSpec.apiContract,
+        "dataModel": plan.projectSpec.dataModel,
+        "conventions": plan.projectSpec.conventions,
+    }
+    empty_sections = [name for name, value in required_spec_sections.items() if not value]
+    if empty_sections:
+        raise ProjectPlanGenerationError(
+            f"Project specification is missing: {', '.join(empty_sections)}."
+        )
 
     all_task_keys = task_keys
     for dep in plan.dependencies:
@@ -270,6 +307,18 @@ Important rules:
 - Use only these task status values: todo, blocked, in_progress, review, changes_requested, done, cancelled (set default to "todo").
 - Use only these dependency types: blocks, related, after (prefer "blocks").
 - Every task must reference an existing milestone via `milestoneClientKey`.
+- Provide a dependency-aware Gantt schedule using zero-based `startDay` and positive
+  `durationDays` for every task, and `startDay` plus `estimatedDays` for every milestone.
+- Treat the approved architecture and UI/UX submissions as binding contracts. Never invent
+  an endpoint, field, role, state, or component that conflicts with them.
+- Every implementation task must include concrete `contractReferences` pointing to the
+  relevant API/design/data evidence, `ownedPaths` that establish non-overlapping code
+  ownership where possible, and `integrationChecks` that another freelancer can run.
+- Split tasks so freelancers can work in parallel against the approved contracts. Add a
+  dependency only when work truly cannot begin independently.
+- The project specification must preserve the approved architecture, design system, API
+  contract, data model, and conventions in implementation-ready detail; do not replace
+  them with generic summaries.
 - Every dependency must reference existing task `clientKey`s.
 - All `clientKey` values must be unique across milestones and tasks.
 - Do not create circular dependencies.
