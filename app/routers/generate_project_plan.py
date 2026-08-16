@@ -40,6 +40,7 @@ class BriefInfo(BaseModel):
     constraintsPreferences: List[str] = Field(default_factory=list)
     clientBackground: Optional[str] = None
     rawBrief: Dict[str, Any] = Field(default_factory=dict)
+    requirementProfile: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SubmissionInfo(BaseModel):
@@ -47,6 +48,9 @@ class SubmissionInfo(BaseModel):
     summary: Optional[str] = None
     content: Dict[str, Any]
     fileUrls: Dict[str, Any] = Field(default_factory=dict)
+    evaluationRequirements: Dict[str, Any] = Field(default_factory=dict)
+    evaluationResult: Dict[str, Any] = Field(default_factory=dict)
+    adminNotes: Optional[str] = None
 
 
 class PlanningTeamMember(BaseModel):
@@ -62,6 +66,7 @@ class GeneratePlanRequest(BaseModel):
     architectureSubmission: SubmissionInfo
     uiuxSubmission: SubmissionInfo
     planningTeam: List[PlanningTeamMember]
+    notes: Optional[str] = None
 
 
 # ── Router Endpoint ─────────────────────────────────────────────────────────
@@ -81,6 +86,7 @@ def generate_project_plan_route(request: GeneratePlanRequest):
             architectureSubmission=request.architectureSubmission.model_dump(),
             uiuxSubmission=request.uiuxSubmission.model_dump(),
             planningTeam=[m.model_dump() for m in request.planningTeam],
+            notes=request.notes,
         )
 
         result = generate_project_plan(input_data)
