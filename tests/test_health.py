@@ -2,7 +2,11 @@ import os
 import unittest
 from unittest.mock import patch
 
-from main import is_ai_provider_configured, is_figma_provider_configured
+from main import (
+    is_ai_provider_configured,
+    is_figma_provider_configured,
+    is_figma_smoke_configured,
+)
 
 
 class AiServiceHealthTests(unittest.TestCase):
@@ -21,6 +25,17 @@ class AiServiceHealthTests(unittest.TestCase):
             env = {} if value is None else {"FIGMA_ACCESS_TOKEN": value}
             with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
                 self.assertEqual(is_figma_provider_configured(), expected)
+
+    def test_figma_smoke_requires_a_figma_https_url(self):
+        for value, expected in (
+            ("", False),
+            ("https://example.com/design/file", False),
+            ("https://www.figma.com/design/file-key/name", True),
+        ):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {"FIGMA_SMOKE_FILE_URL": value}, clear=True
+            ):
+                self.assertEqual(is_figma_smoke_configured(), expected)
 
 
 if __name__ == "__main__":

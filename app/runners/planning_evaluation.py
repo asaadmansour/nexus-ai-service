@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import sys
@@ -11,6 +12,7 @@ from pathlib import Path
 from app.agents.planning_submission_evaluation import evaluate_submission
 
 RESULT_MARKER = "NEXUS_EVALUATION_RESULT:"
+AUDIT_MARKER = "NEXUS_EVALUATION_AUDIT:"
 
 
 def main() -> int:
@@ -27,12 +29,23 @@ def main() -> int:
             )
         result = evaluate_submission(request)
         serialized = json.dumps(result, sort_keys=True, separators=(",", ":"))
+        summary = _summary(request.get("previousVerdict"), result)
         if output_dir.exists():
             (output_dir / "verdict.json").write_text(serialized, encoding="utf-8")
             (output_dir / "summary.md").write_text(
-                _summary(request.get("previousVerdict"), result), encoding="utf-8"
+                summary, encoding="utf-8"
             )
         print(RESULT_MARKER + base64.b64encode(serialized.encode()).decode())
+        audit = json.dumps(
+            {
+                "schemaVersion": 1,
+                "summaryMarkdown": summary,
+                "verdictSha256": hashlib.sha256(serialized.encode()).hexdigest(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        print(AUDIT_MARKER + base64.b64encode(audit.encode()).decode())
         return 0
     except Exception as exc:
         print(f"Planning evaluation failed: {exc}", file=sys.stderr)

@@ -43,6 +43,7 @@ def health():
         "service": "nexus-ai-service",
         "aiProviderConfigured": configured,
         "checks": checks,
+        "figmaLiveSmokeConfigured": is_figma_smoke_configured(),
     }
     return payload if configured else JSONResponse(status_code=503, content=payload)
 
@@ -60,3 +61,10 @@ def is_ai_provider_configured() -> bool:
 def is_figma_provider_configured() -> bool:
     token = os.getenv("FIGMA_ACCESS_TOKEN", "").strip()
     return bool(token and token != "change-me")
+
+
+def is_figma_smoke_configured() -> bool:
+    value = os.getenv("FIGMA_SMOKE_FILE_URL", "").strip()
+    return value.startswith("https://www.figma.com/") or value.startswith(
+        "https://figma.com/"
+    )

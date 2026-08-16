@@ -44,6 +44,21 @@ pipeline {
         sh 'kubectl rollout status deployment/ai-service --timeout=5m'
       }
     }
+
+    stage('Live Figma provider gate') {
+      steps {
+        sh '''
+          set -eu
+          POD=$(kubectl get pod -l app=ai-service -o jsonpath='{.items[0].metadata.name}')
+          SMOKE_URL=$(kubectl exec "$POD" -- printenv FIGMA_SMOKE_FILE_URL || true)
+          if [ -n "$SMOKE_URL" ]; then
+            kubectl exec "$POD" -- python scripts/verify_figma_provider.py
+          else
+            echo "FIGMA_SMOKE_FILE_URL is not configured; deterministic provider-contract tests passed, live provider gate not run."
+          fi
+        '''
+      }
+    }
   }
 
   // Free disk space after every build (pass or fail)
