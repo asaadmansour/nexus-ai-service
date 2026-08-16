@@ -19,6 +19,9 @@ class PlanningRequirement(BaseModel):
     description: str
     mandatory: bool = True
     requiresUrl: bool = False
+    applicability: Literal["required", "optional"] = "required"
+    allowNotApplicable: bool = False
+    rationale: str = ""
 
 
 class SubmissionInput(BaseModel):
@@ -35,6 +38,7 @@ class EvaluateSubmissionRequest(BaseModel):
     project: Dict[str, Any]
     brief: Dict[str, Any] = Field(default_factory=dict)
     requirements: List[PlanningRequirement]
+    requirementProfile: Dict[str, Any] = Field(default_factory=dict)
     submission: SubmissionInput
     approvedArchitecture: Optional[Dict[str, Any]] = None
     previousVerdict: Optional[Dict[str, Any]] = None
@@ -42,7 +46,7 @@ class EvaluateSubmissionRequest(BaseModel):
 
 @router.post("/evaluate-planning-submission")
 def evaluate_planning_submission_route(request: EvaluateSubmissionRequest):
-    """Evaluate every mandatory planning requirement and return revision work."""
+    """Evaluate the applicable project-scaled requirements and return revision work."""
     try:
         return evaluate_submission(request.model_dump())
     except PlanningSubmissionEvaluationError as exc:

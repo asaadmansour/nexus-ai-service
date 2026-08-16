@@ -15,6 +15,7 @@ from app.agents.planning_submission_evaluation import (
 from app.agents.planning_artifacts import (
     ArtifactInspectionError,
     MAX_FIGMA_STRUCTURE_FRAMES,
+    _collect_urls,
     _figma_structure,
     _validate_public_https_url,
 )
@@ -135,6 +136,149 @@ class PlanningSubmissionEvaluationTests(unittest.TestCase):
         self.assertEqual(result.checks[0].status, "partial")
         self.assertEqual(result.checks[0].severity, "blocker")
         self.assertFalse(result.passed)
+
+    def test_justified_not_applicable_is_satisfied_without_artifact(self):
+        request = {
+            "submission": {
+                "submissionType": "architecture",
+                "content": {
+                    "requirementEvidence": {
+                        "api_contract": {
+                            "disposition": "not_applicable",
+                            "notApplicableReason": (
+                                "The approved static page has no runtime API or server."
+                            ),
+                            "summary": "",
+                            "urls": [],
+                        }
+                    }
+                },
+            },
+            "requirements": [
+                {
+                    "key": "api_contract",
+                    "title": "API contract",
+                    "mandatory": True,
+                    "requiresUrl": True,
+                    "allowNotApplicable": True,
+                }
+            ],
+        }
+        raw = {
+            "score": 100,
+            "recommendation": "approve",
+            "checks": [
+                {
+                    "key": "api_contract",
+                    "status": "not_applicable",
+                    "severity": "info",
+                    "evidence": "No runtime API or server.",
+                    "feedback": "Consistent with the static architecture.",
+                }
+            ],
+        }
+
+        result = _normalize_evaluation(request, raw)
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.checks[0].status, "not_applicable")
+        self.assertEqual(result.openIssues, [])
+
+    def test_invalid_not_applicable_claim_is_a_blocking_conflict(self):
+        request = {
+            "submission": {
+                "submissionType": "architecture",
+                "content": {
+                    "requirementEvidence": {
+                        "system_context": {
+                            "disposition": "not_applicable",
+                            "notApplicableReason": "Not needed",
+                        }
+                    }
+                },
+            },
+            "requirements": [
+                {
+                    "key": "system_context",
+                    "title": "System context",
+                    "mandatory": True,
+                    "requiresUrl": False,
+                    "allowNotApplicable": False,
+                }
+            ],
+        }
+        raw = {
+            "score": 100,
+            "recommendation": "approve",
+            "checks": [
+                {
+                    "key": "system_context",
+                    "status": "not_applicable",
+                    "severity": "info",
+                    "evidence": "Not needed",
+                    "feedback": "N/A",
+                }
+            ],
+        }
+
+        result = _normalize_evaluation(request, raw)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.checks[0].status, "conflict")
+        self.assertEqual(result.checks[0].severity, "blocker")
+
+    def test_omitted_optional_requirement_does_not_create_an_issue(self):
+        request = {
+            "submission": {
+                "submissionType": "ui_ux",
+                "content": {"requirementEvidence": {}},
+            },
+            "requirements": [
+                {
+                    "key": "prototype",
+                    "title": "Prototype",
+                    "mandatory": False,
+                    "requiresUrl": False,
+                    "allowNotApplicable": True,
+                }
+            ],
+        }
+        raw = {
+            "score": 100,
+            "recommendation": "approve",
+            "checks": [],
+        }
+
+        result = _normalize_evaluation(request, raw)
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.checks[0].status, "not_applicable")
+        self.assertEqual(result.openIssues, [])
+
+    def test_not_applicable_evidence_urls_are_not_downloaded(self):
+        urls = _collect_urls(
+            {
+                "submission": {
+                    "content": {
+                        "requirementEvidence": {
+                            "api_contract": {
+                                "disposition": "not_applicable",
+                                "urls": ["https://example.com/legacy-api.pdf"],
+                            },
+                            "screen_designs": {
+                                "disposition": "covered",
+                                "urls": ["https://example.com/screen.png"],
+                            },
+                        }
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(
+            urls,
+            [("https://example.com/screen.png", ["screen_designs"])],
+        )
 
     def test_identical_snapshot_reuses_previous_verdict(self):
         request = {

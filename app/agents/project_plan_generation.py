@@ -207,6 +207,13 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
         raise ProjectPlanGenerationError(
             f"Project specification is missing: {', '.join(empty_sections)}."
         )
+    for name, value in required_spec_sections.items():
+        if value.get("applicable") is False:
+            reason = str(value.get("reason") or "").strip()
+            if len(reason) < 20:
+                raise ProjectPlanGenerationError(
+                    f"Project specification N/A section '{name}' needs a concrete reason."
+                )
 
     all_task_keys = task_keys
     tasks_by_key = {task.clientKey: task for task in plan.tasks}
@@ -341,14 +348,23 @@ Important rules:
   `durationDays` for every task, and `startDay` plus `estimatedDays` for every milestone.
 - Treat the approved architecture and UI/UX submissions as binding contracts. Never invent
   an endpoint, field, role, state, or component that conflicts with them.
+- Read the adaptive requirement profile and N/A dispositions stored in each approved
+  submission. Scale the milestone count, task count, team size, documentation, testing,
+  and operational work to trivial, standard, or complex scope. A static Hello World page
+  should remain a tiny plan, not become a multi-service product.
 - Every implementation task must include concrete `contractReferences` pointing to the
   relevant API/design/data evidence, `ownedPaths` that establish non-overlapping code
   ownership where possible, and `integrationChecks` that another freelancer can run.
 - Split tasks so freelancers can work in parallel against the approved contracts. Add a
   dependency only when work truly cannot begin independently.
-- The project specification must preserve the approved architecture, design system, API
-  contract, data model, and conventions in implementation-ready detail; do not replace
-  them with generic summaries.
+- The project specification must preserve applicable approved architecture, design,
+  API, data, and convention decisions in implementation-ready detail. For a section the
+  approved deliverables explicitly establish as not applicable, return
+  {{"applicable": false, "reason": "project-specific explanation"}} instead of
+  inventing an API, database, service, state, or design system.
+- Do not create tasks for omitted optional planning items or for irrelevant enterprise
+  ceremony. Every task must trace to a confirmed feature, applicable contract, delivery
+  requirement, or essential quality check.
 - Every dependency must reference existing task `clientKey`s.
 - All `clientKey` values must be unique across milestones and tasks.
 - Do not create circular dependencies.

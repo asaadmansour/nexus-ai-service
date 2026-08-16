@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 GENAI_TIMEOUT = 60.0
-PROMPT_VERSION = "planning-artifact-evaluator-v2"
+PROMPT_VERSION = "planning-artifact-evaluator-v3-adaptive"
 INLINE_MEDIA_LIMIT = 18 * 1024 * 1024
 
 
@@ -36,7 +36,7 @@ class ArtifactCitation(BaseModel):
 class RequirementCheck(BaseModel):
     key: str
     title: str
-    status: Literal["met", "partial", "missing", "conflict"]
+    status: Literal["met", "not_applicable", "partial", "missing", "conflict"]
     mandatory: bool
     severity: Literal["info", "minor", "major", "blocker"]
     evidence: str
@@ -187,6 +187,11 @@ def _normalize_evaluation(
         evidence = evidence_map.get(key) or {}
         summary = str(evidence.get("summary") or "").strip()
         urls = _string_list(evidence.get("urls"))
+        disposition = str(evidence.get("disposition") or "covered").strip()
+        not_applicable_reason = str(
+            evidence.get("notApplicableReason") or ""
+        ).strip()
+        marked_not_applicable = disposition == "not_applicable"
         inspected = [
             artifact
             for artifact in artifacts
@@ -194,33 +199,62 @@ def _normalize_evaluation(
             and key in (artifact.get("requirementKeys") or [])
             and artifact.get("status") == "inspected"
         ]
-        has_evidence = bool(summary or inspected)
-        has_required_url = not requirement.get("requiresUrl") or bool(inspected)
+        has_evidence = bool(summary or inspected or not_applicable_reason)
+        has_required_url = (
+            marked_not_applicable
+            or not requirement.get("requiresUrl")
+            or bool(inspected)
+        )
         citations = _valid_citations(
             candidate.get("citations"), artifact_by_id, requirement_key=key
         )
         requested_status = candidate.get("status")
-        valid_statuses = {"met", "partial", "missing", "conflict"}
-        status = (
-            requested_status
-            if has_evidence
-            and has_required_url
-            and requested_status in valid_statuses
-            else "missing"
-        )
+        valid_statuses = {
+            "met",
+            "not_applicable",
+            "partial",
+            "missing",
+            "conflict",
+        }
+        mandatory = bool(requirement.get("mandatory", True))
+        if not mandatory and not has_evidence:
+            status = "not_applicable"
+        elif marked_not_applicable:
+            valid_claim = bool(requirement.get("allowNotApplicable")) and len(
+                not_applicable_reason
+            ) >= 20
+            if not valid_claim:
+                status = "conflict"
+            elif requested_status == "not_applicable":
+                status = "not_applicable"
+            elif requested_status in {"partial", "missing", "conflict"}:
+                status = requested_status
+            else:
+                status = "missing"
+        else:
+            status = (
+                requested_status
+                if has_evidence
+                and has_required_url
+                and requested_status in valid_statuses
+                else "missing"
+            )
         if requirement.get("requiresUrl") and status == "met" and not citations:
             status = "partial"
-        mandatory = bool(requirement.get("mandatory", True))
         severity = candidate.get("severity")
         if severity not in {"info", "minor", "major", "blocker"}:
             severity = (
-                "info" if status == "met" else "blocker" if mandatory else "minor"
+                "info"
+                if status in {"met", "not_applicable"}
+                else "blocker"
+                if mandatory
+                else "minor"
             )
-        if mandatory and status != "met":
+        if mandatory and status not in {"met", "not_applicable"}:
             severity = "blocker"
 
         feedback = str(candidate.get("feedback") or "").strip()
-        if status != "met" and not feedback:
+        if status not in {"met", "not_applicable"} and not feedback:
             feedback = f"Complete {requirement['title']} with project-specific details"
             feedback += (
                 " and an accessible evidence URL."
@@ -236,18 +270,25 @@ def _normalize_evaluation(
                 severity=severity,
                 evidence=str(
                     candidate.get("evidence")
+                    or not_applicable_reason
                     or summary
                     or ", ".join(urls)
                     or "No evidence submitted."
                 ),
                 feedback=feedback
-                or "The submitted evidence satisfies this requirement.",
+                or (
+                    "The not-applicable justification is consistent with the approved scope."
+                    if status == "not_applicable"
+                    else "The submitted evidence satisfies this requirement."
+                ),
                 citations=citations,
             )
         )
 
     blockers = [
-        check for check in checks if check.mandatory and check.status != "met"
+        check
+        for check in checks
+        if check.mandatory and check.status not in {"met", "not_applicable"}
     ]
     raw_score = _bounded_score(raw_result.get("score"), checks)
     score = min(raw_score, 69.0) if blockers else raw_score
@@ -296,18 +337,22 @@ def _normalize_evaluation(
             citations=check.citations,
         )
         for check in checks
-        if check.status != "met"
+        if check.status not in {"met", "not_applicable"}
+        and (check.mandatory or check.status != "missing")
     ]
     resolved = [
         str(issue.get("id"))
         for key, issue in previous_issues.items()
-        if any(check.key == key and check.status == "met" for check in checks)
+        if any(
+            check.key == key and check.status in {"met", "not_applicable"}
+            for check in checks
+        )
     ]
     regressions = [
         check.key
         for check in checks
         if previous_checks.get(check.key, {}).get("status") == "met"
-        and check.status != "met"
+        and check.status not in {"met", "not_applicable"}
     ]
     unreadable = [
         str(item.get("error"))
@@ -340,8 +385,9 @@ def _bounded_score(value: Any, checks: List[RequirementCheck]) -> float:
     try:
         score = float(value)
     except (TypeError, ValueError):
-        met = sum(1 for check in checks if check.status == "met")
-        score = (met / len(checks) * 100) if checks else 0
+        applicable = [check for check in checks if check.status != "not_applicable"]
+        met = sum(1 for check in applicable if check.status == "met")
+        score = (met / len(applicable) * 100) if applicable else 100
     return round(max(0, min(100, score)), 2)
 
 
@@ -463,20 +509,21 @@ def _build_prompt(
     submission_type = (request.get("submission") or {}).get("submissionType")
     specialist_rules = (
         """
-For architecture, verify system context, diagrams, technology decisions, module/data
-ownership, complete API/event contracts, data model constraints, auth/security,
-integration failure behavior, measurable non-functional requirements, deployment,
-observability, testing, and an implementation handoff that lets parallel developers
-work without inventing contracts.
+For architecture, evaluate only the supplied project-scaled requirements. Verify the
+applicable context, decisions, contracts, quality targets, deployment, and handoff at
+the depth justified by requirementProfile. Do not demand APIs, databases, services,
+authentication, integrations, enterprise observability, or diagrams when the adaptive
+checklist omitted them. Prefer a minimal static, serverless, or monolithic solution when
+that is what the approved scope needs.
 """
         if submission_type == "architecture"
         else """
-For UI/UX, verify information architecture, complete user and admin flows, wireframes,
-high-fidelity responsive screens, clickable prototype, all loading/empty/error/success/
-permission states, accessibility, design system, assets, and an exact screen-to-API/data
-mapping. Cross-check every claimed endpoint, field, role, validation, and state against
-approvedArchitecture. Put every mismatch in crossContractIssues and mark its relevant
-requirement conflict.
+For UI/UX, evaluate only the supplied project-scaled requirements. Do not demand Figma,
+both wireframes and high-fidelity screens, a prototype, admin flows, a large design
+system, API mapping, or nonexistent loading/error states unless the adaptive checklist
+requires them. Cross-check claimed endpoints, fields, roles, validation, and states
+against approvedArchitecture when those contracts exist. Put actual mismatches in
+crossContractIssues and mark the relevant requirement conflict.
 """
     )
     return f"""
@@ -489,7 +536,13 @@ Rules:
   sufficient for another freelancer to implement independently.
 - Use "partial" when details exist but are incomplete, "missing" when absent or too
   vague, and "conflict" when inconsistent with the brief or approved architecture.
-- Every mandatory partial/missing/conflict is a blocker and requires revision.
+- Use "not_applicable" only when the freelancer selected that disposition, the input
+  requirement allows it, and the justification is consistent with the confirmed brief,
+  approved architecture, and actual artifacts. Otherwise use "conflict" and explain why.
+- An omitted optional requirement is not a defect and must not lower the score or create
+  a revision. Every mandatory partial/missing/conflict is a blocker and requires revision.
+- Never add checklist categories that are absent from the input requirements, and never
+  promote questions, examples, uncertainty, or deliverable labels into project features.
 - Do not approve with any blocker or score below 80.
 - Feedback and revisionItems must say exactly what artifact or contract detail to add.
 - Artifact URLs have been acquired by the trusted inspector. Only artifacts whose manifest

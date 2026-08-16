@@ -137,11 +137,15 @@ Rules:
   unusable. Prefer staying inside the range and explain tight budget risk in
   assumptions/pricingSignals.
 - The amount is a customer-facing final estimate, not an hourly rate.
-- Include architecture and UI/UX planning effort because those are mandatory
-  before implementation.
+- Include architecture and UI/UX planning effort because those stages are mandatory,
+  but scale their effort to the actual complexity. A trivial single-screen project gets
+  a minimal planning package, not enterprise architecture and prototype pricing.
 - Cite market signals briefly in `pricingSignals` and put source URLs/domains in
   `sources` when search grounding provides them.
 - Be conservative: do not underprice complex multi-platform projects.
+- Treat brief.requirementProfile and its cleaned feature list as authoritative for
+  scope sizing. Ignore conversational questions, placeholders, uncertainty, and
+  handover deliverables that may still appear in legacy summary or brief text.
 - Match this exact output schema:
 {schema_json}
 """
@@ -225,17 +229,29 @@ def _fallback_quote(request: ProjectQuoteRequest, reason: str) -> Dict[str, Any]
     feature_count = _count_items(brief.get("coreFeatures"))
     platform_count = max(1, _count_items(brief.get("platforms")))
     deliverable_count = _count_items(brief.get("deliverables"))
-    team_size = _to_number(brief.get("suggestedTeamSize")) or 2.0
+    requirement_profile = brief.get("requirementProfile") or {}
+    planning_complexity = (
+        requirement_profile.get("complexity")
+        if isinstance(requirement_profile, dict)
+        else None
+    )
+    team_size = _to_number(brief.get("suggestedTeamSize")) or (
+        1.0 if planning_complexity == "trivial" else 2.0
+    )
     complexity_score = min(
         1.0,
-        0.2
+        (0.05 if planning_complexity == "trivial" else 0.2)
         + min(feature_count, 8) * 0.06
         + min(platform_count, 3) * 0.08
         + min(deliverable_count, 5) * 0.04
         + min(team_size, 8) * 0.025
         + _deadline_pressure(request.project.get("deadline")),
     )
-    factor = min(0.92, max(0.55, 0.52 + complexity_score * 0.35))
+    factor = (
+        min(0.4, max(0.15, 0.1 + complexity_score * 0.35))
+        if planning_complexity == "trivial"
+        else min(0.92, max(0.55, 0.52 + complexity_score * 0.35))
+    )
     amount = _round_money(budget_min + (budget_max - budget_min) * factor)
     complexity = "high" if complexity_score >= 0.72 else "medium" if complexity_score >= 0.45 else "low"
 
@@ -258,7 +274,7 @@ def _fallback_pricing_signals(request: ProjectQuoteRequest) -> List[str]:
     return [
         f"{_count_items(brief.get('coreFeatures')) or 'Several'} core feature area(s) in scope.",
         f"{max(1, _count_items(brief.get('platforms')))} platform target(s) included.",
-        "Mandatory architecture and UI/UX planning included before implementation.",
+        "Proportionate architecture and UI/UX planning included before implementation.",
     ]
 
 

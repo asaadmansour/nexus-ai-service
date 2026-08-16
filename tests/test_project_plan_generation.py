@@ -97,6 +97,31 @@ class ProjectPlanGenerationTests(unittest.TestCase):
         with self.assertRaisesRegex(ProjectPlanGenerationError, "starts before"):
             validate_and_normalize_plan(plan)
 
+    def test_explicit_not_applicable_spec_sections_are_accepted(self):
+        plan = valid_plan()
+        plan["projectSpec"]["apiContract"] = {
+            "applicable": False,
+            "reason": "The approved page is static and has no runtime API.",
+        }
+        plan["projectSpec"]["dataModel"] = {
+            "applicable": False,
+            "reason": "The approved page stores no persistent user or product data.",
+        }
+
+        result = validate_and_normalize_plan(plan)
+
+        self.assertFalse(result.projectSpec.apiContract["applicable"])
+
+    def test_not_applicable_spec_sections_need_a_real_reason(self):
+        plan = valid_plan()
+        plan["projectSpec"]["apiContract"] = {
+            "applicable": False,
+            "reason": "No API",
+        }
+
+        with self.assertRaisesRegex(ProjectPlanGenerationError, "needs a concrete reason"):
+            validate_and_normalize_plan(plan)
+
     def test_nullable_backend_descriptions_and_summaries_match_contract(self):
         request = GeneratePlanRequest(
             projectPlanJobId="job",

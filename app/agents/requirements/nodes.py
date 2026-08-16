@@ -3,9 +3,12 @@ from typing import Any
 from app.agents.requirements.llm import extract_requirements_with_llm
 from app.agents.requirements.state import REQUIRED_BRIEF_FIELDS, RequirementsState
 
-PROJECT_DERIVED_FIELDS = {"projectType", "budget", "deadline"}
 USER_REQUIRED_BRIEF_FIELDS = [
-    field for field in REQUIRED_BRIEF_FIELDS if field not in PROJECT_DERIVED_FIELDS
+    "mainGoal",
+    "targetUsers",
+    "coreFeatures",
+    "platforms",
+    "deliverables",
 ]
 
 

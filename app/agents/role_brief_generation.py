@@ -25,6 +25,7 @@ class RoleBriefRequest(BaseModel):
     roleKey: str
     project: Dict[str, Any] = Field(default_factory=dict)
     brief: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    requirementProfile: Dict[str, Any] = Field(default_factory=dict)
     standardExpectations: List[str] = Field(default_factory=list)
     freelancer: Optional[Dict[str, Any]] = None
 
@@ -84,6 +85,7 @@ def _build_prompt(request: RoleBriefRequest) -> str:
             "roleKey": request.roleKey,
             "project": request.project,
             "brief": request.brief or {},
+            "requirementProfile": request.requirementProfile,
             "standardExpectations": request.standardExpectations,
             "freelancer": request.freelancer,
         },
@@ -112,10 +114,19 @@ Rules:
 - Keep customer-facing language warm and plain; keep delivery criteria precise.
 - If the brief is missing something important, put it in suggestedQuestions
   instead of pretending it is known.
-- For architecture roles, focus on stack, modules, APIs, data model, security,
-  integrations, performance, deployment, and implementation risks.
-- For UI/UX roles, focus on user journeys, screen map, components, responsive
-  behavior, accessibility, visual direction, states, and handoff details.
+- Treat requirementProfile.complexity and capabilities as scope controls. Scale
+  the deliverable to trivial, standard, or complex work; never turn a small
+  static page into an enterprise planning package.
+- For architecture roles, include stack, modules, APIs, data, security,
+  integrations, operations, and risks only when they apply. Prefer a minimal
+  static, serverless, or monolithic solution when that fits. Explicit N/A notes
+  are better than invented services or contracts.
+- For UI/UX roles, require only the screens, flows, components, responsive
+  behavior, accessibility, visual rules, states, and handoff needed by the
+  confirmed scope. A trivial single-screen project does not require Figma, a
+  clickable prototype, a large design system, or nonexistent error flows.
+- Never promote conversational questions, examples, uncertainty, or deliverable
+  names (such as "like what?", "live link", or "source code") into features.
 - Return JSON only. No markdown. No extra text.
 - Match this exact output schema:
 {schema_json}

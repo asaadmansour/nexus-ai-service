@@ -317,6 +317,18 @@ def _clean_field_value(field: str, value: str) -> str | None:
     if field == "targetUsers" and _looks_like_non_target_user_value(cleaned):
         return None
 
+    if field in {
+        "mainGoal",
+        "targetUsers",
+        "coreFeatures",
+        "platforms",
+        "deliverables",
+    } and _looks_like_question_or_placeholder(cleaned):
+        return None
+
+    if field == "coreFeatures" and _looks_like_deliverable_only_value(cleaned):
+        return None
+
     return cleaned or None
 
 
@@ -341,6 +353,52 @@ def _looks_like_non_target_user_value(value: str) -> bool:
         "system should",
     )
     return any(fragment in lowered for fragment in blocked_fragments)
+
+
+def _looks_like_question_or_placeholder(value: str) -> bool:
+    normalized = " ".join(value.lower().replace("_", " ").split())
+    if "?" in normalized:
+        return True
+    if normalized in {
+        "idk",
+        "i don't know",
+        "i dont know",
+        "not sure",
+        "not sure yet",
+        "notsure",
+        "none",
+        "nothing",
+        "n/a",
+        "na",
+    }:
+        return True
+    return normalized.startswith(
+        (
+            "like what",
+            "what ",
+            "which ",
+            "why ",
+            "how ",
+            "can you ",
+            "could you ",
+            "for example",
+        )
+    )
+
+
+def _looks_like_deliverable_only_value(value: str) -> bool:
+    normalized = " ".join(value.lower().split())
+    return normalized in {
+        "live link",
+        "source code",
+        "documentation",
+        "docs",
+        "design files",
+        "figma file",
+        "handover",
+        "deployment help",
+        "setup help",
+    }
 
 
 def _is_empty(value: Any) -> bool:

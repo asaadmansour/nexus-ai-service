@@ -189,6 +189,8 @@ def _collect_urls(request: Dict[str, Any]) -> List[Tuple[str, List[str]]]:
         for key, item in evidence.items():
             if not isinstance(item, dict):
                 continue
+            if item.get("disposition") == "not_applicable":
+                continue
             for url in item.get("urls") or []:
                 if isinstance(url, str) and url.strip():
                     found.setdefault(url.strip(), set()).add(f"{key_prefix}{key}")
