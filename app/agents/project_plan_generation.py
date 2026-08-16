@@ -12,7 +12,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
 DEFAULT_TIMEOUT_MS = 300000
 PROJECT_PLAN_SYSTEM_PROMPT = """
@@ -192,7 +192,7 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
             raise ProjectPlanGenerationError(
                 f"Task '{task.clientKey}' has no approved contract references."
             )
-        if not task.ownedPaths:
+        if not task.ownedPaths and not _is_read_only_verification_task(task):
             raise ProjectPlanGenerationError(
                 f"Task '{task.clientKey}' has no ownership boundary."
             )
@@ -291,6 +291,41 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
     return plan
 
 
+def _is_read_only_verification_task(task: Task) -> bool:
+    identity = " ".join(
+        [
+            task.clientKey,
+            task.title,
+            task.description,
+            task.roleKey,
+        ]
+    ).lower()
+    verification_markers = (
+        "verification",
+        "quality assurance",
+        "quality-assurance",
+        "quality_assurance",
+        " qa ",
+        "qa_",
+        "qa-",
+        "test review",
+        "acceptance review",
+        "release review",
+    )
+    read_only_markers = (
+        "read-only",
+        "read only",
+        "without changing files",
+        "without code changes",
+        "no code changes",
+        "does not change files",
+    )
+    bounded_identity = f" {identity} "
+    return any(
+        marker in bounded_identity for marker in verification_markers
+    ) and any(marker in bounded_identity for marker in read_only_markers)
+
+
 # ── Main Agent Function ────────────────────────────────────────────────
 
 def generate_project_plan(request: ProjectPlanRequest) -> Dict[str, Any]:
@@ -302,7 +337,24 @@ def generate_project_plan(request: ProjectPlanRequest) -> Dict[str, Any]:
         result = _response_payload(response)
         if result is None:
             raise ProjectPlanGenerationError("Empty response from AI.")
-        validated_plan = validate_and_normalize_plan(result)
+        try:
+            validated_plan = validate_and_normalize_plan(result)
+        except ProjectPlanGenerationError as validation_error:
+            logger.warning(
+                "Gemini project plan failed deterministic validation; requesting one repair: %s",
+                validation_error,
+            )
+            repair_response, repair_model = _generate_plan_response(
+                client,
+                _build_repair_prompt(prompt, result, validation_error),
+            )
+            repaired_result = _response_payload(repair_response)
+            if repaired_result is None:
+                raise ProjectPlanGenerationError(
+                    "AI returned an empty project-plan repair."
+                )
+            validated_plan = validate_and_normalize_plan(repaired_result)
+            model = repair_model
         logger.info("Generated project plan with Gemini model '%s'", model)
         return validated_plan.model_dump()
 
@@ -336,6 +388,7 @@ def _build_prompt(request: ProjectPlanRequest) -> str:
         "planningTeam": request.planningTeam,
         "notes": request.notes,
     }, indent=2)
+    schema_json = json.dumps(ProjectPlanResponse.model_json_schema(), indent=2)
 
     prompt = f"""
 You are a scrum master agent responsible for creating a detailed implementation plan.
@@ -368,9 +421,11 @@ Important rules:
   submission. Scale the milestone count, task count, team size, documentation, testing,
   and operational work to trivial, standard, or complex scope. A static Hello World page
   should remain a tiny plan, not become a multi-service product.
-- Every implementation task must include concrete `contractReferences` pointing to the
-  relevant API/design/data evidence, `ownedPaths` that establish non-overlapping code
-  ownership where possible, and `integrationChecks` that another freelancer can run.
+- Every task must include concrete `contractReferences` pointing to the relevant
+  API/design/data evidence and `integrationChecks` that another freelancer can run.
+  Tasks that change code or assets must include concrete `ownedPaths` establishing a
+  non-overlapping ownership boundary. A genuinely read-only verification or QA task may
+  use an empty `ownedPaths` list; identify it clearly as read-only and do not invent a path.
 - Split tasks so freelancers can work in parallel against the approved contracts. Add a
   dependency only when work truly cannot begin independently.
 - The project specification must preserve applicable approved architecture, design,
@@ -385,28 +440,45 @@ Important rules:
 - All `clientKey` values must be unique across milestones and tasks.
 - Do not create circular dependencies.
 - The response must be valid JSON, with no markdown, no extra text.
-- The response must match the provider-enforced project plan response schema.
+- The response must match this exact project plan response schema, whether or not
+  the provider can enforce it directly:
+{schema_json}
 
 Now generate the plan for this project.
 """
     return prompt
 
 
+def _build_repair_prompt(
+    original_prompt: str,
+    rejected_plan: Dict[str, Any],
+    validation_error: ProjectPlanGenerationError,
+) -> str:
+    return f"""
+{original_prompt}
+
+The previous response below failed deterministic Nexus validation.
+Correct the response so every validation rule is satisfied. Preserve approved scope,
+contracts, role assignments, and valid parallelism; do not add unrelated work.
+
+Validation error:
+{str(validation_error)[:1000]}
+
+Rejected response:
+{json.dumps(rejected_plan, indent=2, default=str)}
+
+Return only the complete corrected JSON project plan.
+"""
+
+
 # ── Gemini Helper ──────────────────────────────────────────────────────
 
 def _get_model_candidates() -> List[str]:
-    primary = (
-        os.getenv("GEMINI_PLAN_MODEL")
-        or os.getenv("GEMINI_MODEL")
-        or DEFAULT_GEMINI_MODEL
-    )
-    plan_fallbacks = os.getenv("GEMINI_PLAN_FALLBACK_MODELS", "").split(",")
+    primary = os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
     general_fallbacks = os.getenv("GEMINI_FALLBACK_MODELS", "").split(",")
     models = [
         primary,
-        *[model.strip() for model in plan_fallbacks if model.strip()],
         *[model.strip() for model in general_fallbacks if model.strip()],
-        DEFAULT_GEMINI_MODEL,
     ]
     return list(dict.fromkeys(models))
 
@@ -427,50 +499,87 @@ def _generate_plan_response(client, prompt_text: str):
 
     last_error: Optional[Exception] = None
     for model in models:
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=[prompt_text],
-                config=types.GenerateContentConfig(
-                    system_instruction=PROJECT_PLAN_SYSTEM_PROMPT,
-                    response_mime_type="application/json",
-                    response_schema=ProjectPlanResponse,
-                    max_output_tokens=max_output_tokens,
-                    temperature=0.3,
-                    top_k=1,
-                    top_p=0.1,
-                    thinking_config=types.ThinkingConfig(
-                        thinking_budget=thinking_budget
+        for mode in ("structured", "json"):
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=[prompt_text],
+                    config=_generation_config(
+                        timeout_ms=timeout_ms,
+                        max_output_tokens=max_output_tokens,
+                        thinking_budget=thinking_budget,
+                        structured=mode == "structured",
                     ),
-                    http_options=types.HttpOptions(timeout=timeout_ms),
-                ),
-            )
-            if _response_payload(response) is None:
-                logger.warning(
-                    "Gemini plan generation returned no JSON with model '%s'; trying fallback",
-                    model,
                 )
-                continue
-            return response, model
-        except errors.APIError as exc:
-            last_error = exc
-            logger.warning(
-                "Gemini plan generation failed with model '%s'; trying fallback: %s",
-                model,
-                exc,
-            )
-        except json.JSONDecodeError as exc:
-            last_error = exc
-            logger.warning(
-                "Gemini plan generation returned malformed JSON with model '%s'; trying fallback",
-                model,
-            )
+                if _response_payload(response) is None:
+                    logger.warning(
+                        "Gemini plan generation returned no JSON with model '%s' mode='%s'",
+                        model,
+                        mode,
+                    )
+                    break
+                return response, model
+            except errors.APIError as exc:
+                last_error = exc
+                if mode == "structured" and _can_retry_without_schema(exc):
+                    logger.warning(
+                        "Gemini rejected the structured plan request for model '%s'; "
+                        "retrying with JSON-only enforcement: %s",
+                        model,
+                        exc,
+                    )
+                    continue
+                logger.warning(
+                    "Gemini plan generation failed with model '%s' mode='%s'; "
+                    "trying the next configured model: %s",
+                    model,
+                    mode,
+                    exc,
+                )
+                break
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                logger.warning(
+                    "Gemini plan generation returned malformed JSON with model '%s' mode='%s'",
+                    model,
+                    mode,
+                )
+                break
 
     if isinstance(last_error, (errors.APIError, json.JSONDecodeError)):
         raise last_error
     raise ProjectPlanGenerationError(
         "All configured Gemini models returned an empty project plan."
     )
+
+
+def _generation_config(
+    *,
+    timeout_ms: int,
+    max_output_tokens: int,
+    thinking_budget: int,
+    structured: bool,
+) -> types.GenerateContentConfig:
+    config: Dict[str, Any] = {
+        "system_instruction": PROJECT_PLAN_SYSTEM_PROMPT,
+        "response_mime_type": "application/json",
+        "max_output_tokens": max_output_tokens,
+        "temperature": 0.3,
+        "top_k": 1,
+        "top_p": 0.1,
+        "http_options": types.HttpOptions(timeout=timeout_ms),
+    }
+    if structured:
+        config["response_json_schema"] = ProjectPlanResponse.model_json_schema()
+    if thinking_budget > 0:
+        config["thinking_config"] = types.ThinkingConfig(
+            thinking_budget=thinking_budget
+        )
+    return types.GenerateContentConfig(**config)
+
+
+def _can_retry_without_schema(exc: errors.APIError) -> bool:
+    return exc.code in {400, 422}
 
 
 def _response_payload(response: Any) -> Optional[Dict[str, Any]]:
