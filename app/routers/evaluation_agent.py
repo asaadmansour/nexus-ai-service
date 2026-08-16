@@ -34,6 +34,10 @@ class TaskForEvaluation(BaseModel):
     is_spec_task: bool = Field(default=False, alias="isSpecTask")
     deliverables: list[str] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list, alias="acceptanceCriteria")
+    integration_checks: list[str] = Field(default_factory=list, alias="integrationChecks")
+    contract_references: list[str] = Field(default_factory=list, alias="contractReferences")
+    owned_paths: list[str] = Field(default_factory=list, alias="ownedPaths")
+    quality_criteria: list[str] = Field(default_factory=list, alias="qualityCriteria")
 
 
 class SubmissionForEvaluation(BaseModel):
@@ -48,6 +52,18 @@ class SubmissionForEvaluation(BaseModel):
     commit_sha: str | None = Field(default=None, alias="commitSha")
     submission_text: str | None = Field(default=None, alias="submissionText")
     notes: str | None = None
+    inspection: dict[str, Any] | None = None
+
+
+class PriorEvaluation(BaseModel):
+    evaluation_run_id: str = Field(alias="evaluationRunId")
+    submission_id: str | None = Field(default=None, alias="submissionId")
+    commit_sha: str | None = Field(default=None, alias="commitSha")
+    score: str | None = None
+    recommendation: str | None = None
+    summary: str | None = None
+    unmet_criteria: list[str] = Field(default_factory=list, alias="unmetCriteria")
+    completed_at: str | None = Field(default=None, alias="completedAt")
 
 
 class EvaluateSubmissionRequest(BaseModel):
@@ -58,6 +74,10 @@ class EvaluateSubmissionRequest(BaseModel):
     # Loose dict so the full spec (architecture/designSystem/dataModel/...) reaches
     # the prompt instead of being stripped to a fixed shared-model shape.
     project_spec: dict[str, Any] | None = Field(default=None, alias="projectSpec")
+    evaluation_history: list[PriorEvaluation] = Field(
+        default_factory=list,
+        alias="evaluationHistory",
+    )
 
 
 @router.post("/evaluate-submission")
