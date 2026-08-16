@@ -13,7 +13,12 @@ from app.runners.implementation_evaluation import (
     _summary,
     _verification_for_model,
 )
-from app.runners.implementation_verification import MAX_OUTPUT_CHARS, _run, _safe_env
+from app.runners.implementation_verification import (
+    MAX_OUTPUT_CHARS,
+    _run,
+    _safe_env,
+    _verify_static_web,
+)
 from app.runners.github_snapshot import (
     SnapshotError,
     _allowed_request_host,
@@ -108,6 +113,36 @@ class ImplementationEvaluationSandboxTests(unittest.TestCase):
         self.assertEqual(result["status"], "passed")
         self.assertTrue(result["outputTruncated"])
         self.assertLessEqual(len(result["output"]), MAX_OUTPUT_CHARS)
+
+    def test_static_site_gets_proportionate_verification_without_a_test_suite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "styles.css").write_text("body { color: black; }", encoding="utf-8")
+            (root / "index.html").write_text(
+                '<!doctype html><link href="styles.css" rel="stylesheet"><h1>Hello World</h1>',
+                encoding="utf-8",
+            )
+
+            result = _verify_static_web(root)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["category"], "build")
+        self.assertIn("Validated 1 HTML", result["output"])
+
+    def test_static_site_verification_reports_broken_local_assets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "index.html").write_text(
+                '<!doctype html><script src="missing.js"></script>',
+                encoding="utf-8",
+            )
+
+            result = _verify_static_web(root)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("missing local asset", result["output"])
 
     def test_persisted_summary_carries_prior_verdicts(self):
         summary = _summary(

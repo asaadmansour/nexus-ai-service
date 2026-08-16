@@ -204,7 +204,15 @@ def _summary(
     verification: dict[str, Any],
     request: dict[str, Any],
 ) -> str:
-    unmet = [item.get("criterion") for item in result.get("rubric") or [] if isinstance(item, dict) and not item.get("met")]
+    rubric = [
+        item for item in result.get("rubric") or [] if isinstance(item, dict)
+    ]
+    unmet = [item.get("criterion") for item in rubric if not item.get("met")]
+    not_applicable = [
+        item.get("criterion")
+        for item in rubric
+        if item.get("status") == "not_applicable"
+    ]
     history = [
         item
         for item in request.get("evaluationHistory") or []
@@ -229,6 +237,9 @@ def _summary(
             "",
             "## Unmet criteria",
             *([f"- {item}" for item in unmet] or ["- None"]),
+            "",
+            "## Not applicable",
+            *([f"- {item}" for item in not_applicable] or ["- None"]),
             "",
             "## Revision notes",
             str(result.get("revisionNotes") or "None"),

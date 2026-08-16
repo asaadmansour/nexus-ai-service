@@ -1,7 +1,8 @@
 import json
 import logging
 import os
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError
@@ -29,14 +30,10 @@ HUMAN_REVIEW_EVIDENCE_TYPES = {
 CODE_EVIDENCE_TYPES = {"repo", "pull_request", "zip"}
 
 DEFAULT_IMPLEMENTATION_QUALITY_CRITERIA = [
-    "The implementation satisfies the task description and intended behavior without omitting required behavior.",
-    "The implementation is functionally correct and handles relevant edge cases and failure paths.",
-    "The code is clear, cohesive, consistently named, and free from unnecessary duplication, dead code, and debug artifacts.",
-    "The design applies SOLID principles, separation of concerns, and modular dependency boundaries where applicable without needless complexity.",
-    "Automated tests cover the changed behavior, important failure paths, and regressions, and the supplied verification evidence passes.",
-    "The implementation preserves the approved architecture, API and data contracts, and integration compatibility.",
-    "Security and privacy controls are appropriate: inputs are validated, authorization is enforced, secrets are not exposed, and sensitive data is handled safely.",
-    "The change is maintainable and operationally ready, with useful error handling and logging plus documentation or migration notes where applicable.",
+    "The implementation is functionally correct for the assigned behavior, handles relevant failure paths, and adds no unrelated scope.",
+    "The code is clear, cohesive, consistently named, free of unnecessary duplication or debug artifacts, and uses only the structure this task needs.",
+    "The change exposes no secrets, unsafe dependency changes, or obviously unsafe handling of untrusted data.",
+    "Proportionate verification passes for this change, using build, lint, focused smoke checks, or automated tests where useful.",
 ]
 
 SUBMISSION_EVALUATION_SYSTEM_PROMPT = """
@@ -47,11 +44,10 @@ Evaluate two independent dimensions:
 1. Requirement compliance: the task description, every acceptance criterion,
    deliverable, integration check, referenced approved contract, assigned path
    boundary, and relevant approved project specification.
-2. Engineering quality: functional correctness and edge cases; clean, readable,
-   cohesive code; appropriate SOLID design and separation of concerns; tests and
-   regression protection; architecture/API/data compatibility; security/privacy;
-   maintainability, error handling, observability, and necessary documentation or
-   migration notes.
+2. Engineering quality: functional correctness and relevant edge cases; clean,
+   readable, cohesive code; proportionate design and verification; applicable
+   architecture/API/data compatibility; applicable security/privacy; and the
+   operational or migration evidence the assigned change actually needs.
 
 Apply principles such as SOLID only where they fit the size and nature of the
 change. Do not reward abstraction for its own sake, require a personal style or
@@ -67,7 +63,11 @@ Evidence rules:
 - A URL, commit SHA, freelancer assertion, or generic phrase such as "tests pass"
   is a pointer or claim, not proof by itself.
 - Never infer hidden source code, passing checks, or artifact contents. When the
-  available evidence cannot verify a row, mark it unmet and require human review.
+  available evidence cannot verify a mandatory row, mark it unmet and require
+  human review.
+- Use not_applicable only when the supplied criterion explicitly permits it and
+  inspected task/snapshot evidence concretely shows that concern is untouched.
+  N/A is not a substitute for missing evidence.
 - Revision feedback must be specific and actionable: identify the failed row,
   explain the evidence or behavior that is missing, and state what should change
   or what verification must be supplied.
@@ -77,10 +77,11 @@ Evidence rules:
   evidence in findings. Prior verdicts are context, not a substitute for current
   inspection and not permission to repeat an earlier mistake.
 
-Scoring guidance: requirements and observable correctness 50%; architecture,
-contracts, and integration 15%; clean code/SOLID/maintainability 15%; tests and
-regression protection 10%; security, reliability, and operations 10%. A passing
-score never overrides an unmet required rubric row.
+Weight explicit requirements and observable correctness most heavily. Then score
+the generated task-specific quality, verification, contract, security, scope, and
+operations rows proportionately. A passing score never overrides an unmet
+mandatory rubric row; a justified not_applicable row is satisfied but earns no
+bonus.
 """.strip()
 
 
@@ -89,7 +90,10 @@ class SubmissionEvaluationError(RuntimeError):
 
 
 class RubricItem(BaseModel):
+    key: Optional[str] = None
     criterion: str
+    category: Optional[str] = None
+    status: Literal["met", "not_applicable", "unmet"]
     met: bool
     evidence: str
 
@@ -172,30 +176,41 @@ def _normalize(
             + ["One or more external GitHub checks are still pending."]
         )
 
-    criteria = _required_rubric_criteria(request)
-    returned = {
+    definitions = _rubric_definitions(request)
+    returned_by_key = {
+        str(item.get("key", "")).strip(): item
+        for item in data.get("rubric", [])
+        if str(item.get("key", "")).strip()
+    }
+    returned_by_criterion = {
         str(item.get("criterion", "")).strip(): item
         for item in data.get("rubric", [])
         if str(item.get("criterion", "")).strip()
     }
-    if criteria:
-        normalized_rubric = [
-            returned.get(criterion)
-            or {
-                "criterion": criterion,
-                "met": False,
-                "evidence": "The evaluation returned no evidence for this criterion.",
-            }
-            for criterion in criteria
-        ]
+    if definitions:
         deterministic = _deterministic_findings(request)
-        data["rubric"] = [
-            deterministic.get(item["criterion"], item) for item in normalized_rubric
-        ]
+        normalized_rubric = []
+        for definition in definitions:
+            candidate = (
+                deterministic.get(definition["criterion"])
+                or returned_by_key.get(definition["key"])
+                or returned_by_criterion.get(definition["criterion"])
+                or {
+                    "criterion": definition["criterion"],
+                    "met": False,
+                    "status": "unmet",
+                    "evidence": "The evaluation returned no evidence for this criterion.",
+                }
+            )
+            normalized_rubric.append(_normalize_rubric_item(definition, candidate))
+        data["rubric"] = normalized_rubric
     else:
         data["rubric"] = [
             {
+                "key": "task_requirements_missing",
                 "criterion": "Task acceptance criteria are defined",
+                "category": "requirement",
+                "status": "unmet",
                 "met": False,
                 "evidence": "The task has no acceptance criteria or deliverables to evaluate.",
             }
@@ -223,43 +238,226 @@ def _normalize(
 
 def _dedupe_strings(values: List[Any]) -> List[str]:
     return list(
-        dict.fromkeys(str(value).strip() for value in values if str(value).strip())
+        dict.fromkeys(
+            str(value).strip()
+            for value in values
+            if value is not None and str(value).strip()
+        )
+    )
+
+
+def _criterion_definition(
+    key: str,
+    criterion: str,
+    category: str,
+    rationale: str,
+    *,
+    allow_not_applicable: bool = False,
+) -> Dict[str, Any]:
+    return {
+        "key": key,
+        "criterion": criterion,
+        "category": category,
+        "mandatory": True,
+        "allowNotApplicable": allow_not_applicable,
+        "rationale": rationale,
+    }
+
+
+def _configured_evaluation_definitions(request: Dict[str, Any]) -> List[Dict[str, Any]]:
+    task = request.get("task") or {}
+    configured = task.get("evaluationCriteria") or []
+    definitions: List[Dict[str, Any]] = []
+    for index, item in enumerate(configured):
+        if not isinstance(item, dict):
+            continue
+        criterion = str(item.get("criterion") or "").strip()
+        if not criterion:
+            continue
+        definitions.append(
+            {
+                "key": str(item.get("key") or f"configured_{index + 1}").strip(),
+                "criterion": criterion,
+                "category": str(item.get("category") or "requirement").strip(),
+                "mandatory": item.get("mandatory") is not False,
+                "allowNotApplicable": item.get("allowNotApplicable") is True,
+                "rationale": str(item.get("rationale") or "Task-specific evaluation criterion.").strip(),
+            }
+        )
+    return definitions
+
+
+def _fallback_evaluation_definitions(request: Dict[str, Any]) -> List[Dict[str, Any]]:
+    task = request.get("task") or {}
+    submission = request.get("submission") or {}
+    submission_type = str(submission.get("submissionType", "other")).lower()
+    definitions: List[Dict[str, Any]] = []
+
+    requirement_groups = [
+        ("acceptance", task.get("acceptanceCriteria") or [], "Explicit acceptance criterion."),
+        ("deliverable", task.get("deliverables") or [], "Explicit task deliverable."),
+        ("integration", task.get("integrationChecks") or [], "Explicit integration check."),
+    ]
+    for prefix, values, rationale in requirement_groups:
+        for index, criterion in enumerate(_dedupe_strings(list(values))):
+            definitions.append(
+                _criterion_definition(
+                    f"{prefix}_{index + 1}", criterion, "requirement", rationale
+                )
+            )
+
+    if submission_type not in CODE_EVIDENCE_TYPES:
+        return definitions
+
+    quality_criteria = _dedupe_strings(list(task.get("qualityCriteria") or []))
+    if quality_criteria:
+        for index, criterion in enumerate(quality_criteria):
+            definitions.append(
+                _criterion_definition(
+                    f"legacy_quality_{index + 1}",
+                    criterion,
+                    "quality",
+                    "Explicit quality policy supplied by the caller.",
+                )
+            )
+    else:
+        for index, criterion in enumerate(DEFAULT_IMPLEMENTATION_QUALITY_CRITERIA):
+            category = "verification" if index == 3 else ("security" if index == 2 else "quality")
+            definitions.append(
+                _criterion_definition(
+                    f"fallback_quality_{index + 1}",
+                    criterion,
+                    category,
+                    "Safe proportional baseline for an older caller.",
+                )
+            )
+        text = "\n".join(
+            _dedupe_strings(
+                [task.get("title"), task.get("description")]
+                + list(task.get("acceptanceCriteria") or [])
+                + list(task.get("deliverables") or [])
+                + list(task.get("integrationChecks") or [])
+            )
+        )
+        requires_tests = bool(
+            re.search(
+                r"\b(automated tests?|unit tests?|integration tests?|contract tests?|end[- ]to[- ]end tests?|e2e tests?|test suite|test coverage|regression tests?|jest|vitest|pytest|cypress|playwright|api|endpoint|auth|database|migration|payment|workflow|algorithm|calculation|validation|retry|idempot|webhook)\b|\bstate (management|machine|transition)\b|\b(add|write|include|provide) (automated )?tests?\b",
+                text,
+                re.IGNORECASE,
+            )
+        )
+        if requires_tests:
+            definitions = [
+                item
+                for item in definitions
+                if item["key"] != "fallback_quality_4"
+            ]
+            definitions.append(
+                _criterion_definition(
+                    "verification_automated_tests",
+                    "Automated tests cover the changed behavior and relevant failure or regression paths, and the supplied test evidence passes.",
+                    "verification",
+                    "Behavioral risk makes executable regression protection mandatory.",
+                )
+            )
+
+    for index, reference in enumerate(
+        _dedupe_strings(list(task.get("contractReferences") or []))
+    ):
+        definitions.append(
+            _criterion_definition(
+                f"contract_reference_{index + 1}",
+                f"Implementation conforms to approved contract reference: {reference}",
+                "contract",
+                "Explicit approved contract reference.",
+            )
+        )
+    owned_paths = _dedupe_strings(list(task.get("ownedPaths") or []))
+    if owned_paths:
+        definitions.append(
+            _criterion_definition(
+                "scope_owned_paths",
+                "Changes respect the assigned owned paths unless a documented "
+                f"integration exception is necessary: {', '.join(owned_paths)}",
+                "scope",
+                "Owned paths support safe parallel integration.",
+            )
+        )
+    return definitions
+
+
+def _rubric_definitions(request: Dict[str, Any]) -> List[Dict[str, Any]]:
+    definitions = _configured_evaluation_definitions(request)
+    if not definitions:
+        definitions = _fallback_evaluation_definitions(request)
+
+    deterministic = _deterministic_findings(request)
+    existing = {item["criterion"] for item in definitions}
+    for index, (criterion, finding) in enumerate(deterministic.items()):
+        if criterion in existing:
+            continue
+        definitions.append(
+            _criterion_definition(
+                f"verification_observed_{index + 1}",
+                criterion,
+                "verification",
+                "Objective sandbox or GitHub verification evidence.",
+                allow_not_applicable=finding.get("status") == "not_applicable",
+            )
+        )
+    return definitions
+
+
+def _normalize_rubric_item(
+    definition: Dict[str, Any], candidate: Dict[str, Any]
+) -> Dict[str, Any]:
+    evidence = str(candidate.get("evidence") or "").strip()
+    raw_status = str(candidate.get("status") or "").strip().lower()
+    if raw_status not in {"met", "not_applicable", "unmet"}:
+        raw_status = "met" if candidate.get("met") is True else "unmet"
+
+    if raw_status == "not_applicable":
+        if not definition.get("allowNotApplicable") or not _na_evidence_is_concrete(evidence):
+            raw_status = "unmet"
+            evidence = (
+                "Not applicable was not permitted or was not supported by concrete "
+                "task/snapshot evidence. " + evidence
+            ).strip()
+
+    return {
+        "key": definition["key"],
+        "criterion": definition["criterion"],
+        "category": definition["category"],
+        "status": raw_status,
+        "met": raw_status in {"met", "not_applicable"},
+        "evidence": evidence or "No concrete evidence was returned for this criterion.",
+    }
+
+
+def _na_evidence_is_concrete(evidence: str) -> bool:
+    normalized = " ".join(evidence.lower().split())
+    if len(normalized) < 24:
+        return False
+    if normalized in {"not applicable", "n/a", "not needed", "does not apply"}:
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "does not touch",
+            "no changed",
+            "no files",
+            "outside the",
+            "unchanged",
+            "not present",
+            "contains no",
+            "static",
+            "explicitly skipped",
+        )
     )
 
 
 def _required_rubric_criteria(request: Dict[str, Any]) -> List[str]:
-    task = request.get("task") or {}
-    submission = request.get("submission") or {}
-    submission_type = str(submission.get("submissionType", "other")).lower()
-
-    quality_criteria = list(task.get("qualityCriteria") or [])
-    if submission_type in CODE_EVIDENCE_TYPES and not quality_criteria:
-        # Direct callers and older backend versions still receive the safe
-        # baseline even if they omit the newly explicit policy field.
-        quality_criteria = DEFAULT_IMPLEMENTATION_QUALITY_CRITERIA
-
-    criteria = (
-        list(task.get("acceptanceCriteria") or [])
-        + list(task.get("deliverables") or [])
-        + list(task.get("integrationChecks") or [])
-        + quality_criteria
-    )
-
-    criteria.extend(
-        f"Implementation conforms to approved contract reference: {reference}"
-        for reference in _dedupe_strings(list(task.get("contractReferences") or []))
-    )
-
-    owned_paths = _dedupe_strings(list(task.get("ownedPaths") or []))
-    if owned_paths:
-        criteria.append(
-            "Changes respect the assigned owned paths unless a documented "
-            f"integration exception is necessary: {', '.join(owned_paths)}"
-        )
-
-    criteria.extend(_deterministic_findings(request).keys())
-
-    return _dedupe_strings(criteria)
+    return [item["criterion"] for item in _rubric_definitions(request)]
 
 
 def _deterministic_findings(request: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -316,11 +514,14 @@ def _deterministic_findings(request: Dict[str, Any]) -> Dict[str, Dict[str, Any]
     if inspection and isinstance(verification, dict):
         coverage = verification.get("coverage") or {}
         if isinstance(coverage, dict) and coverage.get("test") is not True:
+            definitions = _configured_evaluation_definitions(request)
+            if not definitions:
+                definitions = _fallback_evaluation_definitions(request)
             test_criterion = next(
                 (
-                    criterion
-                    for criterion in DEFAULT_IMPLEMENTATION_QUALITY_CRITERIA
-                    if criterion.startswith("Automated tests cover")
+                    item["criterion"]
+                    for item in definitions
+                    if item.get("key") == "verification_automated_tests"
                 ),
                 None,
             )
@@ -357,10 +558,20 @@ def _deterministic_findings(request: Dict[str, Any]) -> Dict[str, Dict[str, Any]
                 continue
             criterion = f"GitHub check passes: {item.get('name')}"
             conclusion = str(item.get("conclusion") or "pending")
+            skipped = conclusion == "skipped"
             findings[criterion] = {
                 "criterion": criterion,
+                "status": (
+                    "not_applicable"
+                    if skipped
+                    else ("met" if conclusion in {"success", "neutral"} else "unmet")
+                ),
                 "met": conclusion in {"success", "neutral", "skipped"},
-                "evidence": f"GitHub check conclusion: {conclusion}.",
+                "evidence": (
+                    "The external check was explicitly skipped by GitHub for this commit."
+                    if skipped
+                    else f"GitHub check conclusion: {conclusion}."
+                ),
             }
         for item in github_checks.get("statuses") or []:
             if not isinstance(item, dict) or not item.get("context"):
@@ -395,9 +606,7 @@ def _github_checks_pending(inspection: Any) -> bool:
 
 def _build_prompt(request: Dict[str, Any]) -> str:
     input_json = json.dumps(request, indent=2)
-    required_criteria_json = json.dumps(
-        _required_rubric_criteria(request), indent=2
-    )
+    required_criteria_json = json.dumps(_rubric_definitions(request), indent=2)
     schema_dict = SubmissionEvaluationResponse.model_json_schema()
     schema_json = json.dumps(schema_dict, indent=2)
 
@@ -407,7 +616,7 @@ Evaluate this delivery submission under the system policy.
 Submission and approved context:
 {input_json}
 
-Required rubric criteria (return exactly one row for every string, copied exactly):
+Required rubric definitions (return exactly one row for every definition):
 {required_criteria_json}
 
 Evidence handling by submissionType:
@@ -425,12 +634,17 @@ Evidence handling by submissionType:
   and set requiresHumanReview to true.
 
 For every required rubric criterion produce one rubric entry:
+- key: copy the definition key exactly
 - criterion: copy the input text exactly
-- met: true only if there is concrete evidence it is satisfied
+- category: copy the definition category exactly
+- status: met, unmet, or not_applicable. Use not_applicable only when
+  allowNotApplicable is true and cite concrete inspected evidence showing why
+  the concern is outside this change.
+- met: true for met or justified not_applicable; false for unmet
 - evidence: one short sentence citing the evidence (or why it is unverifiable)
 
 Then decide:
-- passed: true only if every required criterion is met with real evidence
+- passed: true only if every mandatory criterion is met or justifiably N/A
 - score: 0-100 reflecting how complete and correct the work is
 - revisionRequested: true when the freelancer should fix and resubmit
 - revisionNotes: specific, actionable feedback naming the unmet items (not generic)

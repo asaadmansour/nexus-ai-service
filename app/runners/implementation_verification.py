@@ -34,11 +34,18 @@ def main() -> int:
 
         results: list[dict[str, Any]] = []
         projects = _discover_projects(work)
+        recognized_project = False
         for project in projects[:MAX_PROJECTS]:
             if (project / "package.json").is_file():
+                recognized_project = True
                 results.extend(_verify_node(project, work))
             if _is_python_project(project):
+                recognized_project = True
                 results.extend(_verify_python(project, work))
+        if not recognized_project:
+            static_web_result = _verify_static_web(work)
+            if static_web_result:
+                results.append(static_web_result)
         results.append(_secret_scan(work))
 
         command_failures = [item for item in results if item["status"] == "failed"]
@@ -104,6 +111,80 @@ def _discover_projects(root: Path) -> list[Path]:
 
 def _is_python_project(path: Path) -> bool:
     return any((path / marker).is_file() for marker in ["pyproject.toml", "requirements.txt", "setup.py", "setup.cfg"])
+
+
+def _verify_static_web(root: Path) -> dict[str, Any] | None:
+    """Give dependency-free static sites an objective, proportionate check."""
+    ignored = {".git", "node_modules", "dist", "build", ".next"}
+    html_files = [
+        path
+        for path in root.rglob("*.html")
+        if path.is_file()
+        and not path.is_symlink()
+        and not any(part in ignored for part in path.relative_to(root).parts)
+    ][:100]
+    if not html_files:
+        return None
+
+    failures: list[str] = []
+    checked_refs = 0
+    reference_pattern = re.compile(
+        r"\b(src|href)\s*=\s*(['\"])(.*?)\2", re.IGNORECASE
+    )
+    for html_file in html_files:
+        try:
+            if html_file.stat().st_size > 2_000_000:
+                failures.append(f"{html_file.relative_to(root)} is too large to inspect")
+                continue
+            content = html_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            failures.append(f"{html_file.relative_to(root)} is unreadable: {exc}")
+            continue
+        if not content.strip():
+            failures.append(f"{html_file.relative_to(root)} is empty")
+            continue
+        for match in reference_pattern.finditer(content):
+            attribute = match.group(1).lower()
+            reference = match.group(3).strip()
+            if not reference or reference.startswith(("#", "data:", "http:", "https:", "mailto:", "tel:", "javascript:")):
+                continue
+            clean = reference.split("#", 1)[0].split("?", 1)[0]
+            if not clean:
+                continue
+            # Extensionless href values are often client-side routes, not files.
+            if attribute == "href" and not Path(clean).suffix:
+                continue
+            target = root / clean.lstrip("/") if clean.startswith("/") else html_file.parent / clean
+            try:
+                target.resolve().relative_to(root.resolve())
+            except ValueError:
+                failures.append(
+                    f"{html_file.relative_to(root)} references a path outside the repository: {reference}"
+                )
+                continue
+            checked_refs += 1
+            if not target.is_file():
+                failures.append(
+                    f"{html_file.relative_to(root)} has a missing local asset: {reference}"
+                )
+        if len(failures) >= 100:
+            break
+
+    if failures:
+        return _static_result(
+            ".",
+            "build",
+            "static-web-sanity",
+            False,
+            "; ".join(failures[:100]),
+        )
+    return _static_result(
+        ".",
+        "build",
+        "static-web-sanity",
+        True,
+        f"Validated {len(html_files)} HTML file(s) and {checked_refs} local asset reference(s).",
+    )
 
 
 def _verify_node(project: Path, root: Path) -> list[dict[str, Any]]:
