@@ -14,7 +14,7 @@ from app.agents.requirements.state import REQUIRED_BRIEF_FIELDS, RequirementsSta
 
 load_dotenv()
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 logger = logging.getLogger(__name__)
 
 REQUIREMENT_FIELD_VALUE_SCHEMA: dict[str, Any] = {

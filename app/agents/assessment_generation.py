@@ -13,7 +13,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ASSESSMENT_GEMINI_MODEL = "gemini-3.5-flash"
+DEFAULT_ASSESSMENT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 
 
 class AssessmentGenerationServiceError(RuntimeError):

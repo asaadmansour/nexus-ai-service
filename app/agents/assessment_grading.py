@@ -13,7 +13,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GRADING_GEMINI_MODEL = "gemini-3.5-flash"
+DEFAULT_GRADING_GEMINI_MODEL = "gemini-3.1-flash-lite"
 GENAI_TIMEOUT = 120.0
 
 

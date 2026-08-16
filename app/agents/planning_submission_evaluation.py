@@ -17,7 +17,7 @@ from app.agents.planning_artifacts import inspect_artifacts
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 GENAI_TIMEOUT = 60.0
 PROMPT_VERSION = "planning-artifact-evaluator-v3-adaptive"
 INLINE_MEDIA_LIMIT = 18 * 1024 * 1024
@@ -585,32 +585,46 @@ def _generate_evaluation_response(client, contents: List[Any]):
     if not models:
         raise PlanningSubmissionEvaluationError("No Gemini model configured.")
 
-    last_model = models[-1]
+    last_error: Optional[Exception] = None
     for model in models:
-        try:
-            return (
-                client.models.generate_content(
+        for structured in (True, False):
+            try:
+                config: Dict[str, Any] = {
+                    "response_mime_type": "application/json",
+                    "temperature": 0.1,
+                    "top_k": 1,
+                    "top_p": 0.1,
+                    "http_options": types.HttpOptions(
+                        timeout=int(GENAI_TIMEOUT * 1000)
+                    ),
+                }
+                if structured:
+                    config["response_json_schema"] = (
+                        ModelEvaluationResponse.model_json_schema()
+                    )
+                response = client.models.generate_content(
                     model=model,
                     contents=contents,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=ModelEvaluationResponse,
-                        temperature=0.1,
-                        top_k=1,
-                        top_p=0.1,
-                        http_options=types.HttpOptions(
-                            timeout=int(GENAI_TIMEOUT * 1000)
-                        ),
-                    ),
-                ),
-                model,
-            )
-        except errors.APIError as exc:
-            if model == last_model:
-                raise
-            logger.warning(
-                "Gemini planning evaluation failed with model '%s'; trying fallback: %s",
-                model,
-                exc,
-            )
+                    config=types.GenerateContentConfig(**config),
+                )
+                return response, model
+            except errors.APIError as exc:
+                last_error = exc
+                if structured and exc.code in {400, 422}:
+                    logger.warning(
+                        "Gemini rejected the structured planning evaluation request "
+                        "for model '%s'; retrying in JSON-only mode: %s",
+                        model,
+                        exc,
+                    )
+                    continue
+                logger.warning(
+                    "Gemini planning evaluation failed with model '%s'; "
+                    "trying the next configured model: %s",
+                    model,
+                    exc,
+                )
+                break
+    if last_error is not None:
+        raise last_error
     raise PlanningSubmissionEvaluationError("All Gemini models failed.")

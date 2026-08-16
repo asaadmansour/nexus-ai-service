@@ -17,7 +17,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_CV_GEMINI_MODEL = "gemini-3.5-flash"
+DEFAULT_CV_GEMINI_MODEL = "gemini-3.1-flash-lite"
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 READ_CHUNK = MAX_FILE_SIZE + 1      # read one byte over the limit to detect oversize
 

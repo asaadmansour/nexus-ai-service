@@ -1,17 +1,25 @@
 import unittest
+from unittest.mock import patch
 
 from app.agents.submission_evaluation import (
+    DEFAULT_GEMINI_MODEL,
     DEFAULT_IMPLEMENTATION_QUALITY_CRITERIA,
     RubricItem,
     SUBMISSION_EVALUATION_SYSTEM_PROMPT,
     SubmissionEvaluationResponse,
     _build_prompt,
+    _get_model_candidates,
     _normalize,
     _required_rubric_criteria,
 )
 
 
 class SubmissionEvaluationTests(unittest.TestCase):
+    @patch.dict("os.environ", {}, clear=True)
+    def test_uses_supported_shared_default_when_environment_is_missing(self):
+        self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-3.1-flash-lite")
+        self.assertEqual(_get_model_candidates(), [DEFAULT_GEMINI_MODEL])
+
     def test_missing_rubric_item_prevents_false_pass(self):
         response = SubmissionEvaluationResponse(
             passed=True,

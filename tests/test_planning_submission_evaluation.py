@@ -1,13 +1,19 @@
 import json
 import unittest
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from google.genai import errors
+
 from app.agents.planning_submission_evaluation import (
+    DEFAULT_GEMINI_MODEL,
     ModelEvaluationResponse,
     PROMPT_VERSION,
     _context_hash,
     _evaluation_input_hash,
+    _generate_evaluation_response,
+    _get_model_candidates,
     _normalize_evaluation,
     _validate_request_contract,
     evaluate_submission,
@@ -23,6 +29,39 @@ from app.runners.planning_evaluation import _summary
 
 
 class PlanningSubmissionEvaluationTests(unittest.TestCase):
+    @patch.dict("os.environ", {}, clear=True)
+    def test_uses_supported_shared_default_when_environment_is_missing(self):
+        self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-3.1-flash-lite")
+        self.assertEqual(_get_model_candidates(), [DEFAULT_GEMINI_MODEL])
+
+    @patch.dict(
+        "os.environ",
+        {"GEMINI_MODEL": "working-model", "GEMINI_FALLBACK_MODELS": ""},
+        clear=False,
+    )
+    def test_provider_schema_rejection_retries_in_json_only_mode(self):
+        calls = []
+
+        class Models:
+            def generate_content(self, **kwargs):
+                calls.append(kwargs)
+                if len(calls) == 1:
+                    raise errors.APIError(
+                        400,
+                        {"error": {"message": "Schema is too complex"}},
+                    )
+                return SimpleNamespace(text="{}")
+
+        response, model = _generate_evaluation_response(
+            SimpleNamespace(models=Models()), ["prompt"]
+        )
+
+        self.assertEqual(model, "working-model")
+        self.assertEqual(response.text, "{}")
+        self.assertEqual(len(calls), 2)
+        self.assertIsNotNone(calls[0]["config"].response_json_schema)
+        self.assertIsNone(calls[1]["config"].response_json_schema)
+
     def test_gemini_response_schema_has_no_open_dictionary_fields(self):
         schema = ModelEvaluationResponse.model_json_schema()
 
