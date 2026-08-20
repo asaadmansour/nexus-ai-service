@@ -27,8 +27,19 @@ class ProjectQuoteRequest(BaseModel):
     brief: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
+class RoleEstimate(BaseModel):
+    roleKey: str
+    people: int = Field(ge=1, le=12)
+    hoursEach: float = Field(gt=0)
+    hourlyRate: float = Field(gt=0)
+    subtotal: float = Field(gt=0)
+
+
 class ProjectQuoteResponse(BaseModel):
     amount: float
+    recommendedMinimum: float
+    budgetGap: float = 0
+    roleEstimates: List[RoleEstimate] = Field(min_length=4)
     currency: str
     quoteStatus: str = "pending_customer"
     confidence: float = 0.7
@@ -89,9 +100,22 @@ def _normalize_quote_response(
     budget_min: float,
     budget_max: float,
 ) -> ProjectQuoteResponse:
-    quote.amount = _round_money(_clamp(quote.amount, budget_min, budget_max))
+    role_total = sum(
+        estimate.people * estimate.hoursEach * estimate.hourlyRate
+        for estimate in quote.roleEstimates
+    )
+    for estimate in quote.roleEstimates:
+        estimate.subtotal = _round_money(
+            estimate.people * estimate.hoursEach * estimate.hourlyRate
+        )
+    market_minimum = role_total / 0.9
+    quote.recommendedMinimum = _round_money(
+        max(quote.recommendedMinimum, quote.amount, market_minimum)
+    )
+    quote.amount = _round_money(max(budget_min, quote.recommendedMinimum))
+    quote.budgetGap = _round_money(max(quote.recommendedMinimum - budget_max, 0))
     quote.currency = quote.currency or _currency(request.project)
-    quote.quoteStatus = "pending_customer"
+    quote.quoteStatus = "out_of_budget" if quote.budgetGap > 0 else "pending_customer"
     if not quote.rationale.strip():
         quote.rationale = "Estimated from the confirmed requirements and budget range."
     if not quote.assumptions:
@@ -131,11 +155,15 @@ Input:
 
 Rules:
 - Return JSON only. No markdown. No extra text.
-- The final `amount` MUST be inside the customer budget range:
-  minimum {budget_min}, maximum {budget_max}.
-- Use `quoteStatus: "pending_customer"` unless the budget range itself is
-  unusable. Prefer staying inside the range and explain tight budget risk in
-  assumptions/pricingSignals.
+- Estimate realistic role hours, people, and hourly market rates first. Do not
+  force the estimate inside the customer's budget.
+- `recommendedMinimum` is the market-based total including a 10% Nexus fee.
+- `amount` is at least recommendedMinimum. If recommendedMinimum exceeds the
+  customer's maximum {budget_max}, set quoteStatus to "out_of_budget" and set
+  budgetGap to the exact difference. Otherwise use "pending_customer".
+- roleEstimates must cover principal_reviewer, architect, ui_ux, and implementation.
+  The implementation row may contain multiple people. Its subtotal is
+  people × hoursEach × hourlyRate.
 - The amount is a customer-facing final estimate, not an hourly rate.
 - Include architecture and UI/UX planning effort because those stages are mandatory,
   but scale their effort to the actual complexity. A trivial single-screen project gets
@@ -247,21 +275,39 @@ def _fallback_quote(request: ProjectQuoteRequest, reason: str) -> Dict[str, Any]
         + min(team_size, 8) * 0.025
         + _deadline_pressure(request.project.get("deadline")),
     )
-    factor = (
-        min(0.4, max(0.15, 0.1 + complexity_score * 0.35))
-        if planning_complexity == "trivial"
-        else min(0.92, max(0.55, 0.52 + complexity_score * 0.35))
-    )
-    amount = _round_money(budget_min + (budget_max - budget_min) * factor)
     complexity = "high" if complexity_score >= 0.72 else "medium" if complexity_score >= 0.45 else "low"
+    complexity_key = (
+        "trivial"
+        if planning_complexity == "trivial"
+        else "complex" if complexity == "high" else "standard"
+    )
+    hours = {
+        "trivial": {"reviewer": 2, "architect": 2, "uiux": 2, "implementation": 8},
+        "standard": {"reviewer": 12, "architect": 16, "uiux": 18, "implementation": 160},
+        "complex": {"reviewer": 28, "architect": 36, "uiux": 40, "implementation": 480},
+    }[complexity_key]
+    workers = max(1, min(8, round(team_size)))
+    role_estimates = [
+        _role_estimate("principal_reviewer", 1, hours["reviewer"], _market_rate("MARKET_RATE_PRINCIPAL_REVIEWER", 650)),
+        _role_estimate("architect", 1, hours["architect"], _market_rate("MARKET_RATE_ARCHITECT", 550)),
+        _role_estimate("ui_ux", 1, hours["uiux"], _market_rate("MARKET_RATE_UI_UX", 450)),
+        _role_estimate("implementation", workers, _ceil_div(hours["implementation"], workers), _market_rate("MARKET_RATE_DEVELOPER", 400)),
+    ]
+    labor_total = sum(item.subtotal for item in role_estimates)
+    recommended_minimum = _round_money(labor_total / 0.9)
+    amount = _round_money(max(budget_min, recommended_minimum))
+    budget_gap = _round_money(max(recommended_minimum - budget_max, 0))
 
     quote = ProjectQuoteResponse(
         amount=amount,
+        recommendedMinimum=recommended_minimum,
+        budgetGap=budget_gap,
+        roleEstimates=role_estimates,
         currency=_currency(request.project),
-        quoteStatus="pending_customer",
+        quoteStatus="out_of_budget" if budget_gap > 0 else "pending_customer",
         confidence=0.55,
         complexity=complexity,
-        rationale="Estimated from the confirmed requirements and budget range.",
+        rationale="Estimated from role hours and market-rate assumptions before comparison with the customer budget.",
         assumptions=_default_assumptions() + [reason],
         pricingSignals=_fallback_pricing_signals(request),
         sources=["Nexus deterministic project quote fallback"],
@@ -347,3 +393,26 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
 
 def _round_money(value: float) -> float:
     return round(float(value), 2)
+
+
+def _market_rate(name: str, fallback: float) -> float:
+    return _to_number(os.getenv(name)) or fallback
+
+
+def _role_estimate(
+    role_key: str,
+    people: int,
+    hours_each: float,
+    hourly_rate: float,
+) -> RoleEstimate:
+    return RoleEstimate(
+        roleKey=role_key,
+        people=people,
+        hoursEach=hours_each,
+        hourlyRate=hourly_rate,
+        subtotal=_round_money(people * hours_each * hourly_rate),
+    )
+
+
+def _ceil_div(value: float, divisor: int) -> int:
+    return int((value + divisor - 1) // divisor)

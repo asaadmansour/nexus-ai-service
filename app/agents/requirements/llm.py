@@ -65,6 +65,16 @@ _client: Any | None = None
 
 
 def extract_requirements_with_llm(state: RequirementsState) -> dict[str, Any]:
+    latest_message = state.get("latestMessage", "")
+    if _is_direct_prompt_injection(latest_message):
+        return {
+            "extractedFields": {},
+            "assistantReply": (
+                "I can help define this project, but I can’t change my role or reveal "
+                "private instructions. Tell me what outcome you want the product to "
+                "achieve, and I’ll turn it into a clear requirement."
+            ),
+        }
     prompt = build_requirements_extraction_prompt(state)
     raw_text = _generate_json_text(prompt)
     parsed = _parse_json_object(raw_text)
@@ -411,3 +421,35 @@ def _is_empty(value: Any) -> bool:
     if isinstance(value, int | float):
         return False
     return True
+
+
+def _is_direct_prompt_injection(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = " ".join(value.lower().split())
+    instruction_markers = (
+        "ignore previous instructions",
+        "ignore all previous",
+        "ignore the system prompt",
+        "reveal the system prompt",
+        "show me your system prompt",
+        "print your hidden instructions",
+        "developer message",
+        "hidden chain of thought",
+        "bypass your rules",
+        "jailbreak",
+    )
+    action_markers = (
+        "output instead",
+        "return non-json",
+        "call a tool",
+        "reveal",
+        "print",
+        "show me",
+    )
+    if any(marker in normalized for marker in instruction_markers):
+        return True
+    return (
+        ("system prompt" in normalized or "hidden instruction" in normalized)
+        and any(marker in normalized for marker in action_markers)
+    )

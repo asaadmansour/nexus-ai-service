@@ -57,6 +57,14 @@ class Milestone(BaseModel):
     acceptanceCriteria: List[str] = Field(default_factory=list)
 
 
+class TaskCheckpoint(BaseModel):
+    key: str
+    title: str
+    offsetDays: int = Field(ge=0)
+    weightPercent: float = Field(gt=0, le=100)
+    penaltyPercent: float = Field(ge=0, le=25)
+
+
 class Task(BaseModel):
     clientKey: str
     milestoneClientKey: str
@@ -73,6 +81,7 @@ class Task(BaseModel):
     contractReferences: List[str] = Field(default_factory=list)
     ownedPaths: List[str] = Field(default_factory=list)
     integrationChecks: List[str] = Field(default_factory=list)
+    checkpoints: List[TaskCheckpoint] = Field(min_length=2)
     status: Optional[str] = "todo"
 
     @validator('priority')
@@ -164,6 +173,27 @@ class ProjectPlanRequest(BaseModel):
 # ── Validation Helper ──────────────────────────────────────────────────
 
 def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
+    for index, raw_task in enumerate(data.get("tasks") or []):
+        if not isinstance(raw_task, dict) or raw_task.get("checkpoints"):
+            continue
+        duration = max(1, int(raw_task.get("durationDays") or 1))
+        task_key = str(raw_task.get("clientKey") or f"task-{index + 1}")
+        raw_task["checkpoints"] = [
+            {
+                "key": f"{task_key}-progress",
+                "title": "Progress checkpoint",
+                "offsetDays": max(0, duration // 2),
+                "weightPercent": 40,
+                "penaltyPercent": 3,
+            },
+            {
+                "key": f"{task_key}-final",
+                "title": "Final delivery",
+                "offsetDays": duration,
+                "weightPercent": 60,
+                "penaltyPercent": 7,
+            },
+        ]
     try:
         plan = ProjectPlanResponse(**data)
     except ValidationError as e:
@@ -199,6 +229,26 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
         if not task.integrationChecks:
             raise ProjectPlanGenerationError(
                 f"Task '{task.clientKey}' has no integration checks."
+            )
+        if len({checkpoint.key for checkpoint in task.checkpoints}) != len(
+            task.checkpoints
+        ):
+            raise ProjectPlanGenerationError(
+                f"Task '{task.clientKey}' has duplicate checkpoint keys."
+            )
+        if any(
+            checkpoint.offsetDays > task.durationDays
+            for checkpoint in task.checkpoints
+        ):
+            raise ProjectPlanGenerationError(
+                f"Task '{task.clientKey}' has a checkpoint after its due date."
+            )
+        checkpoint_weight = sum(
+            checkpoint.weightPercent for checkpoint in task.checkpoints
+        )
+        if abs(checkpoint_weight - 100) > 0.01:
+            raise ProjectPlanGenerationError(
+                f"Task '{task.clientKey}' checkpoint weights must total 100."
             )
 
     for milestone in plan.milestones:
@@ -415,6 +465,10 @@ Important rules:
 - Every task must reference an existing milestone via `milestoneClientKey`.
 - Provide a dependency-aware Gantt schedule using zero-based `startDay` and positive
   `durationDays` for every task, and `startDay` plus `estimatedDays` for every milestone.
+- Every task must contain at least two meaningful checkpoints. Use `offsetDays` relative
+  to the task start, weights totaling exactly 100, and proportional `penaltyPercent`
+  values between 0 and 25. Include an intermediate progress checkpoint and a final
+  delivery checkpoint; keep both inside the task duration and the project deadline.
 - Treat the approved architecture and UI/UX submissions as binding contracts. Never invent
   an endpoint, field, role, state, or component that conflicts with them.
 - Read the adaptive requirement profile and N/A dispositions stored in each approved

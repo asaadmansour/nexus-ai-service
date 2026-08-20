@@ -35,11 +35,14 @@ from pydantic import BaseModel, ConfigDict, Field
 # value in [0, 1]; we multiply by the weight here. The weights sum to 100, so
 # the final score is 0-100. Change these to change what "a good match" means.
 WEIGHTS = {
-    "skills": 35,       # required-skill overlap + skill scores + reliability
-    "projectFit": 20,   # brief relevance: dense + sparse fused via RRF
-    "availability": 15,  # weekly hours (pool-relative)
-    "experience": 15,   # years of experience (pool-relative)
-    "rateFit": 15,      # hourly rate (pool-relative)
+    "skills": 25,
+    "projectFit": 18,
+    "availability": 12,
+    "experience": 12,
+    "rateFit": 10,
+    "roleFit": 10,
+    "performance": 10,
+    "riskSafety": 3,
 }
 
 # --- Tuning knobs (standard defaults; you rarely change these) ---------------
@@ -98,6 +101,12 @@ class FreelancerCandidate(_Loose):
     embeddingSimilarity: float | None = None      # 0-1 "meaning" score, computed by the backend
     activeTaskCount: int | None = None            # implementation tasks already assigned
     activeProjectCount: int | None = None         # projects they are already working on
+    performanceScore: float | None = 100
+    approvalRate: float | None = None
+    onTimeRate: float | None = None
+    missedDeadlines: int | None = 0
+    projectRemovals: int | None = 0
+    riskFlags: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # Implementation task being matched (only sent when targetType == "task").
@@ -349,6 +358,61 @@ def _score_rate_fit(cand: FreelancerCandidate, pool_min: float, pool_max: float)
     return 0.75                          # everyone charges the same -> neutral-ish
 
 
+def _score_role_fit(cand: FreelancerCandidate, role_key: str | None) -> float:
+    if not role_key:
+        return 0.6
+    role_tokens = set(_tokenize(role_key.replace("_", " ")))
+    profile_tokens = set(
+        _tokenize(
+            " ".join(
+                [cand.headline or "", cand.profileSummary or "", *cand.skills]
+            )
+        )
+    )
+    if not role_tokens:
+        return 0.6
+    overlap = len(role_tokens & profile_tokens) / len(role_tokens)
+    leadership_bonus = 0.0
+    if role_key == "principal_reviewer":
+        leadership_terms = {
+            "principal",
+            "lead",
+            "architect",
+            "architecture",
+            "senior",
+            "review",
+            "leadership",
+            "system",
+            "security",
+        }
+        leadership_bonus = min(
+            0.35, len(leadership_terms & profile_tokens) * 0.07
+        )
+    return _clamp(0.35 + overlap * 0.45 + leadership_bonus)
+
+
+def _score_performance(cand: FreelancerCandidate) -> float:
+    score = cand.performanceScore if cand.performanceScore is not None else 75
+    base = _clamp(score / 100)
+    approval = (
+        _clamp(cand.approvalRate) if cand.approvalRate is not None else 0.75
+    )
+    on_time = _clamp(cand.onTimeRate) if cand.onTimeRate is not None else 0.75
+    return _clamp(base * 0.5 + approval * 0.25 + on_time * 0.25)
+
+
+def _score_risk_safety(cand: FreelancerCandidate) -> float:
+    penalty = min(
+        1.0,
+        (cand.missedDeadlines or 0) * 0.12
+        + (cand.projectRemovals or 0) * 0.25,
+    )
+    penalty += min(0.4, len(cand.riskFlags) * 0.05)
+    if (cand.activeProjectCount or 0) >= 3:
+        penalty += 0.2
+    return _clamp(1.0 - penalty)
+
+
 def _build_rationale(cand: FreelancerCandidate, matched: list[str], required: list[str], project_fit: float) -> str:
     # Builds the human sentence shown to the admin, e.g.
     # "Matches 3 of 5 required skills; 20h availability; 4 years experience; rate 25."
@@ -380,7 +444,13 @@ class _PoolStats:
         self.max_rate = max(rates, default=0)
 
 
-def _score_candidate(cand: FreelancerCandidate, required: list[str], project_fit: float, pool: _PoolStats) -> dict[str, Any]:
+def _score_candidate(
+    cand: FreelancerCandidate,
+    required: list[str],
+    project_fit: float,
+    pool: _PoolStats,
+    role_key: str | None,
+) -> dict[str, Any]:
     """Score ONE freelancer: run all 5 scorers, weight them, and package the
     result (score + per-category breakdown + rationale + evidence)."""
     skills_norm, matched, missing = _score_skills(cand, required)
@@ -392,6 +462,9 @@ def _score_candidate(cand: FreelancerCandidate, required: list[str], project_fit
         "experience": round(_score_experience(cand, pool.max_exp) * WEIGHTS["experience"], 2),
         "rateFit": round(_score_rate_fit(cand, pool.min_rate, pool.max_rate) * WEIGHTS["rateFit"], 2),
         "projectFit": round(project_fit * WEIGHTS["projectFit"], 2),
+        "roleFit": round(_score_role_fit(cand, role_key) * WEIGHTS["roleFit"], 2),
+        "performance": round(_score_performance(cand) * WEIGHTS["performance"], 2),
+        "riskSafety": round(_score_risk_safety(cand) * WEIGHTS["riskSafety"], 2),
     }
     score = round(sum(breakdown.values()), 2)  # add the 5 categories -> 0-100
 
@@ -406,6 +479,12 @@ def _score_candidate(cand: FreelancerCandidate, required: list[str], project_fit
         risk_flags.append("low_assessment_score")
     if (cand.activeTaskCount or 0) >= 3:
         risk_flags.append("high_active_workload")
+    if (cand.missedDeadlines or 0) > 0:
+        risk_flags.append("missed_deadlines")
+    if (cand.projectRemovals or 0) > 0:
+        risk_flags.append("prior_project_removal")
+    if cand.riskFlags:
+        risk_flags.append("platform_risk_history")
 
     # This dict is exactly what the backend stores and the UI shows.
     return {
@@ -421,6 +500,12 @@ def _score_candidate(cand: FreelancerCandidate, required: list[str], project_fit
             "availabilityHours": hours,
             "yearsExperience": cand.yearsExperience or 0,
             "activeTaskCount": cand.activeTaskCount or 0,
+            "activeProjectCount": cand.activeProjectCount or 0,
+            "performanceScore": cand.performanceScore,
+            "approvalRate": cand.approvalRate,
+            "onTimeRate": cand.onTimeRate,
+            "missedDeadlines": cand.missedDeadlines or 0,
+            "projectRemovals": cand.projectRemovals or 0,
         },
     }
 
@@ -433,7 +518,7 @@ def match_freelancers(request: MatchFreelancersRequest) -> dict[str, Any]:
 
     # Score each candidate. zip(...) pairs each candidate with its projectFit.
     scored = [
-        _score_candidate(cand, required, fit, pool)
+        _score_candidate(cand, required, fit, pool, request.targetRoleKey)
         for cand, fit in zip(request.candidates, project_fits)
     ]
 
@@ -478,5 +563,6 @@ def _build_summary(ranked: list[dict[str, Any]], request: MatchFreelancersReques
     return (
         f"Ranked {count} approved {target} by {relevance} "
         f"relevance (vector + BM25 via reciprocal rank fusion), skills, availability, "
-        f"experience, and rate fit. {top_name} leads with a score of {top['score']:g}."
+        f"experience, role fit, rate fit, performance history, and risk. "
+        f"{top_name} leads with a score of {top['score']:g}."
     )
