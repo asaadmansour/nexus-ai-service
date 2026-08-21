@@ -3,8 +3,10 @@ from unittest.mock import patch
 
 from app.agents.project_quote_estimation import (
     ProjectQuoteRequest,
+    _build_prompt,
     _fallback_quote,
     _is_minimal_website_scope,
+    estimate_project_quote,
 )
 
 
@@ -93,6 +95,55 @@ class ProjectQuoteEstimationTests(unittest.TestCase):
                 }
             )
         )
+
+    @patch.dict(
+        "os.environ",
+        {
+            "MARKET_RATE_PRINCIPAL_REVIEWER": "650",
+            "MARKET_RATE_ARCHITECT": "550",
+            "MARKET_RATE_UI_UX": "450",
+            "MARKET_RATE_DEVELOPER": "400",
+        },
+        clear=False,
+    )
+    def test_customer_budget_minimum_does_not_inflate_the_quote(self):
+        request = ProjectQuoteRequest(
+            project={"budgetMin": 275_000, "budgetMax": 300_000, "currency": "EGP"},
+            brief={
+                "mainGoal": "Present the business and collect customer enquiries",
+                "targetUsers": ["potential customers"],
+                "coreFeatures": ["Show service information", "Contact enquiry form"],
+                "platforms": ["website"],
+                "solutionType": "single landing page",
+                "scopeDetails": "one page with five static sections",
+                "integrations": "none",
+                "adminNeeds": "no admin dashboard",
+                "deliverables": ["working website", "source code", "live link"],
+            },
+        )
+
+        quote = estimate_project_quote(request)
+
+        self.assertEqual(quote["amount"], quote["recommendedMinimum"])
+        self.assertLess(quote["amount"], 275_000)
+        prompt = _build_prompt(request)
+        self.assertNotIn("275000", prompt)
+        self.assertNotIn("budgetMin", prompt)
+
+    def test_quote_rejects_unpriceable_scope(self):
+        with self.assertRaisesRegex(ValueError, "scopeDetails"):
+            estimate_project_quote(
+                ProjectQuoteRequest(
+                    project={"budgetMin": 500, "budgetMax": 300_000},
+                    brief={
+                        "mainGoal": "I want to make a mobile website",
+                        "targetUsers": ["customers"],
+                        "coreFeatures": ["website"],
+                        "platforms": ["website"],
+                        "solutionType": "responsive website",
+                    },
+                )
+            )
 
 
 if __name__ == "__main__":

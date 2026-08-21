@@ -10,6 +10,8 @@ from google import genai
 from google.genai import errors, types
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from app.agents.requirements.quality import get_brief_scope_gaps
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -69,14 +71,20 @@ class ProjectQuoteResponse(BaseModel):
 
 
 def estimate_project_quote(request: ProjectQuoteRequest) -> Dict[str, Any]:
+    scope_gaps = get_brief_scope_gaps(request.brief or {})
+    if scope_gaps:
+        raise ValueError(
+            "A reliable quote needs more confirmed scope: " + ", ".join(scope_gaps)
+        )
+
     if _is_minimal_website_scope(request.brief or {}):
         return _fallback_quote(
             request,
             "A deterministic minimal-scope quote was used to prevent speculative work.",
         )
 
-    budget_min, budget_max = _budget_range(request.project)
-    prompt = _build_prompt(request, budget_min, budget_max)
+    _, budget_max = _budget_range(request.project)
+    prompt = _build_prompt(request)
 
     try:
         client = genai.Client()
@@ -85,7 +93,6 @@ def estimate_project_quote(request: ProjectQuoteRequest) -> Dict[str, Any]:
         validated = _normalize_quote_response(
             ProjectQuoteResponse(**result),
             request,
-            budget_min,
             budget_max,
         )
         return validated.model_dump()
@@ -103,7 +110,6 @@ def estimate_project_quote(request: ProjectQuoteRequest) -> Dict[str, Any]:
 def _normalize_quote_response(
     quote: ProjectQuoteResponse,
     request: ProjectQuoteRequest,
-    budget_min: float,
     budget_max: float,
 ) -> ProjectQuoteResponse:
     role_total = sum(
@@ -115,10 +121,8 @@ def _normalize_quote_response(
             estimate.people * estimate.hoursEach * estimate.hourlyRate
         )
     market_minimum = role_total / 0.9
-    quote.recommendedMinimum = _round_money(
-        max(quote.recommendedMinimum, quote.amount, market_minimum)
-    )
-    quote.amount = _round_money(max(budget_min, quote.recommendedMinimum))
+    quote.recommendedMinimum = _round_money(market_minimum)
+    quote.amount = quote.recommendedMinimum
     quote.budgetGap = _round_money(max(quote.recommendedMinimum - budget_max, 0))
     quote.currency = quote.currency or _currency(request.project)
     quote.quoteStatus = "out_of_budget" if quote.budgetGap > 0 else "pending_customer"
@@ -131,16 +135,17 @@ def _normalize_quote_response(
     return quote
 
 
-def _build_prompt(request: ProjectQuoteRequest, budget_min: float, budget_max: float) -> str:
+def _build_prompt(request: ProjectQuoteRequest) -> str:
+    pricing_project = {
+        key: value
+        for key, value in request.project.items()
+        if key not in {"budgetMin", "budgetMax", "budget", "quotedAmount"}
+    }
     input_json = json.dumps(
         {
-            "project": request.project,
+            "project": pricing_project,
             "brief": request.brief or {},
-            "budgetRange": {
-                "min": budget_min,
-                "max": budget_max,
-                "currency": _currency(request.project),
-            },
+            "currency": _currency(request.project),
         },
         indent=2,
         default=str,
@@ -164,9 +169,10 @@ Rules:
 - Estimate realistic role hours, people, and hourly market rates first. Do not
   force the estimate inside the customer's budget.
 - `recommendedMinimum` is the market-based total including a 10% Nexus fee.
-- `amount` is at least recommendedMinimum. If recommendedMinimum exceeds the
-  customer's maximum {budget_max}, set quoteStatus to "out_of_budget" and set
-  budgetGap to the exact difference. Otherwise use "pending_customer".
+- `amount` equals recommendedMinimum. The customer's budget is intentionally absent
+  from the pricing evidence so it cannot anchor the estimate. Return
+  quoteStatus "pending_customer" and budgetGap 0; the platform compares the
+  independently calculated amount with the customer's budget afterward.
 - roleEstimates must cover principal_reviewer, architect, ui_ux, and implementation.
   The implementation row may contain multiple people. Its subtotal is
   people × hoursEach × hourlyRate.
@@ -266,7 +272,7 @@ def _extract_json(text: str) -> str:
 
 
 def _fallback_quote(request: ProjectQuoteRequest, reason: str) -> Dict[str, Any]:
-    budget_min, budget_max = _budget_range(request.project)
+    _, budget_max = _budget_range(request.project)
     brief = request.brief or {}
     feature_count = _count_items(brief.get("coreFeatures"))
     platform_count = max(1, _count_items(brief.get("platforms")))
@@ -312,7 +318,7 @@ def _fallback_quote(request: ProjectQuoteRequest, reason: str) -> Dict[str, Any]
     ]
     labor_total = sum(item.subtotal for item in role_estimates)
     recommended_minimum = _round_money(labor_total / 0.9)
-    amount = _round_money(max(budget_min, recommended_minimum))
+    amount = recommended_minimum
     budget_gap = _round_money(max(recommended_minimum - budget_max, 0))
 
     quote = ProjectQuoteResponse(

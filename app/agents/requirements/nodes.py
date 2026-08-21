@@ -1,19 +1,14 @@
 from typing import Any
 
 from app.agents.requirements.llm import extract_requirements_with_llm
+from app.agents.requirements.quality import (
+    USER_REQUIRED_BRIEF_FIELDS,
+    get_brief_scope_gaps,
+    is_brief_scope_field_complete,
+    is_requirements_guidance_request,
+    is_uncertain_answer,
+)
 from app.agents.requirements.state import REQUIRED_BRIEF_FIELDS, RequirementsState
-
-USER_REQUIRED_BRIEF_FIELDS = [
-    "mainGoal",
-    "targetUsers",
-    "coreFeatures",
-    "platforms",
-    "solutionType",
-    "scopeDetails",
-    "integrations",
-    "adminNeeds",
-    "deliverables",
-]
 
 
 QUESTION_BY_FIELD = {
@@ -26,7 +21,7 @@ QUESTION_BY_FIELD = {
     "scopeDetails": "What should the first version contain? A rough page or screen count plus the main user journey is enough—for example, one landing page with five sections, or ten screens covering signup, browsing, checkout, and order tracking.",
     "integrations": "Does the first version connect to anything external, such as payments, maps, email/SMS, social login, analytics, or an existing system? You can simply say \"none\".",
     "adminNeeds": "Will your team need a private admin area to manage content, users, orders, or reports? If not, say \"no admin dashboard\".",
-    "deliverables": "Good. What final things should be handed over when the work is done? For example a working website, mobile app, admin dashboard, source code, deployment/setup help, or simply \"not sure\".",
+    "deliverables": "Good. What final things should be handed over when the work is done? For example a working website, mobile app, admin dashboard, source code, or deployment/setup help. If you are unsure, I can recommend a handover package for this project.",
     "constraintsPreferences": "Any preferences or constraints we should respect? This can be simple: colors, style, payment provider, delivery rules, integrations, language, or things you want to avoid.",
     "clientBackground": "To guide this properly, what is your background here? For example business owner, operations, non-technical founder, technical founder, or something else.",
     "suggestedTeamSize": "Do you already have a team size in mind, or should we suggest what fits the scope? It is completely okay to say \"not sure\".",
@@ -64,13 +59,16 @@ def extract_requirements_node(state: RequirementsState) -> dict[str, Any]:
 
     pending_field = state.get("pendingField")
     latest_message = state.get("latestMessage", "")
-    if (
-        isinstance(pending_field, str)
-        and _is_advice_request(latest_message)
-        and _is_uncertain_value(extracted_fields.get(pending_field))
-    ):
+    guidance_field = _resolve_guidance_field(latest_message, pending_field)
+    if isinstance(pending_field, str) and is_requirements_guidance_request(latest_message):
         extracted_fields = dict(extracted_fields)
         extracted_fields.pop(pending_field, None)
+    if guidance_field and (
+        is_uncertain_answer(latest_message)
+        or _is_definition_request(latest_message)
+        or not assistant_reply
+    ):
+        assistant_reply = _build_guidance_reply(guidance_field)
 
     return {
         "useFastPath": False,
@@ -108,11 +106,7 @@ def check_missing_fields_node(state: RequirementsState) -> dict[str, Any]:
     if not isinstance(merged_brief, dict):
         merged_brief = {}
 
-    missing_fields = [
-        field
-        for field in USER_REQUIRED_BRIEF_FIELDS
-        if not _has_value(merged_brief.get(field))
-    ]
+    missing_fields = get_brief_scope_gaps(merged_brief)
     completed_fields = len(USER_REQUIRED_BRIEF_FIELDS) - len(missing_fields)
     completion_percentage = round(
         (completed_fields / len(USER_REQUIRED_BRIEF_FIELDS)) * 100
@@ -185,7 +179,12 @@ def _filter_required_fields(fields: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in fields.items()
-        if key in REQUIRED_BRIEF_FIELDS and _has_value(value)
+        if key in REQUIRED_BRIEF_FIELDS
+        and _has_value(value)
+        and (
+            key not in USER_REQUIRED_BRIEF_FIELDS
+            or is_brief_scope_field_complete(key, value)
+        )
     }
 
 
@@ -205,44 +204,72 @@ def _has_value(value: Any) -> bool:
     return True
 
 
-def _is_advice_request(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-
-    normalized = " ".join(value.lower().split())
-    advice_markers = (
-        "what do you suggest",
-        "what do u suggest",
-        "what should",
-        "what would you",
-        "what would u",
-        "recommend",
-        "suggest",
-        "help me choose",
-        "what do you mean",
-        "explain",
-    )
-    uncertainty_markers = ("idk", "i don't know", "i dont know", "not sure")
-    return any(marker in normalized for marker in advice_markers) and (
-        "?" in normalized
-        or any(marker in normalized for marker in uncertainty_markers)
-    )
-
-
-def _is_uncertain_value(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-
-    normalized = value.lower().replace("_", " ").replace("-", " ").strip()
-    normalized = " ".join(normalized.split())
-    return normalized in {
-        "idk",
-        "i do not know",
-        "i don't know",
-        "not sure",
-        "not sure yet",
-        "notsure",
-        "no preference",
-        "no preferences",
-        "not decided",
+def _build_guidance_reply(field: str) -> str:
+    replies = {
+        "mainGoal": "No problem. The goal is the business result, not the technology. Common choices are getting leads, selling online, reducing manual work, or helping customers self-serve. Which result matters most for this first version?",
+        "targetUsers": "No problem. Think about the people who will actually use it: customers, staff, admins, or a specific group. Who completes the main action in the first version?",
+        "coreFeatures": "No problem. Features are the actions the product must support. For a small website that might be reading key information and sending an enquiry; for an app it could include accounts, booking, or checkout. What is the single most important action a user must complete?",
+        "platforms": "No problem. A responsive website opens in a browser and works on phones; a mobile app is installed from iOS or Android stores and costs more to build. I usually recommend starting with a responsive website unless app-only features are essential. Which should we use?",
+        "solutionType": "No problem. A landing page is one focused page, a marketing website has several information pages, a web app supports accounts or workflows, and a mobile app is installed on iOS or Android. Which smallest option meets your first-release goal?",
+        "scopeDetails": "No problem. A rough answer is enough: either give a page or screen count, or describe the path from opening the product to completing the main goal. For example, 'one page with five sections' or 'signup, browse, checkout, confirmation.' What is closest?",
+        "integrations": "No problem. Integrations are outside services such as payments, maps, email or SMS, social login, analytics, or an existing business system. I recommend 'none' for the first version unless one is essential. Which do you need?",
+        "adminNeeds": "No problem. An admin area is a private screen your team uses to manage content, users, orders, bookings, or reports. If nobody needs to manage changing data, I recommend no admin dashboard. Should we include one, and what would it manage?",
+        "deliverables": "No problem. Deliverables are what you receive at handover. I recommend the working product, source code, deployment or a live link, and a short setup guide. Should I use that package?",
     }
+    return replies.get(
+        field,
+        "No problem. I can explain the options and recommend the simplest one that meets your goal. What part would you like me to clarify?",
+    )
+
+
+def _resolve_guidance_field(value: Any, pending_field: Any) -> str | None:
+    if not isinstance(value, str) or not is_requirements_guidance_request(value):
+        return None
+    normalized = " ".join(value.lower().replace("_", " ").split())
+    markers = {
+        "mainGoal": ("goal", "outcome", "business result"),
+        "targetUsers": ("target user", "audience", "who will use"),
+        "coreFeatures": ("feature", "functionality", "must have"),
+        "platforms": ("platform", "website or app", "web or mobile"),
+        "solutionType": ("solution type", "landing page", "web app"),
+        "scopeDetails": ("scope", "page count", "screen count", "user journey"),
+        "integrations": ("integration", "third party", "external service"),
+        "adminNeeds": ("admin", "dashboard", "back office"),
+        "deliverables": ("deliverable", "handover", "receive at the end"),
+    }
+    for field, field_markers in markers.items():
+        if any(marker in normalized for marker in field_markers):
+            return field
+    if is_uncertain_answer(value) or any(
+        marker in normalized
+        for marker in (
+            "suggest",
+            "recommend",
+            "help me choose",
+            "help me decide",
+            "what do you mean",
+            "explain this",
+        )
+    ):
+        return pending_field if isinstance(pending_field, str) else None
+    return None
+
+
+def _is_definition_request(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = " ".join(value.lower().split())
+    return (
+        "?" in normalized
+        or normalized.startswith(
+            (
+                "what ",
+                "which ",
+                "why ",
+                "how ",
+                "can you explain",
+                "could you explain",
+                "explain ",
+            )
+        )
+    )

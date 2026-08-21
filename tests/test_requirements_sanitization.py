@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from app.agents.requirements.llm import (
     _is_clearly_unrelated_question,
@@ -7,7 +8,10 @@ from app.agents.requirements.llm import (
     _normalize_platforms_for_message,
     extract_requirements_with_llm,
 )
-from app.agents.requirements.nodes import check_missing_fields_node
+from app.agents.requirements.nodes import (
+    check_missing_fields_node,
+    extract_requirements_node,
+)
 
 
 class RequirementsSanitizationTests(unittest.TestCase):
@@ -87,6 +91,116 @@ class RequirementsSanitizationTests(unittest.TestCase):
         self.assertEqual(
             result["missingFields"],
             ["solutionType", "scopeDetails", "integrations", "adminNeeds"],
+        )
+
+    def test_uncertain_answers_never_complete_price_critical_fields(self):
+        result = check_missing_fields_node(
+            {
+                "mergedBrief": {
+                    "mainGoal": "idk",
+                    "targetUsers": "not sure",
+                    "coreFeatures": "whatever",
+                    "platforms": "you choose",
+                    "solutionType": "no idea",
+                    "scopeDetails": "tbd",
+                    "integrations": "not sure",
+                    "adminNeeds": "idk",
+                    "deliverables": "no preference",
+                }
+            }
+        )
+
+        self.assertFalse(result["isComplete"])
+        self.assertEqual(
+            result["missingFields"],
+            [
+                "mainGoal",
+                "targetUsers",
+                "coreFeatures",
+                "platforms",
+                "solutionType",
+                "scopeDetails",
+                "integrations",
+                "adminNeeds",
+                "deliverables",
+            ],
+        )
+
+    @patch("app.agents.requirements.nodes.extract_requirements_with_llm")
+    def test_idk_returns_guidance_and_is_not_stored(self, mocked_extract):
+        mocked_extract.return_value = {
+            "extractedFields": {"scopeDetails": "not_sure"},
+            "assistantReply": None,
+        }
+
+        result = extract_requirements_node(
+            {
+                "latestMessage": "idk",
+                "pendingField": "scopeDetails",
+            }
+        )
+
+        self.assertNotIn("scopeDetails", result["extractedFields"])
+        self.assertIn("page or screen count", result["assistantReply"])
+
+    @patch("app.agents.requirements.nodes.extract_requirements_with_llm")
+    def test_definition_question_is_answered_for_the_named_concept(self, mocked_extract):
+        mocked_extract.return_value = {
+            "extractedFields": {},
+            "assistantReply": "Could you clarify?",
+        }
+
+        result = extract_requirements_node(
+            {
+                "latestMessage": "What is an admin dashboard?",
+                "pendingField": "scopeDetails",
+            }
+        )
+
+        self.assertIn("private screen", result["assistantReply"])
+        self.assertIn("manage content", result["assistantReply"])
+
+    @patch("app.agents.requirements.nodes.extract_requirements_with_llm")
+    def test_general_project_question_keeps_the_models_direct_answer(
+        self, mocked_extract
+    ):
+        mocked_extract.return_value = {
+            "extractedFields": {},
+            "assistantReply": (
+                "I can calculate a reliable quote after we confirm the first-release "
+                "scope; your budget will be treated as a limit, not a target price."
+            ),
+        }
+
+        result = extract_requirements_node(
+            {
+                "latestMessage": "How much will this cost?",
+                "pendingField": "scopeDetails",
+            }
+        )
+
+        self.assertIn("budget will be treated as a limit", result["assistantReply"])
+
+    def test_mobile_website_without_product_scope_is_not_complete(self):
+        result = check_missing_fields_node(
+            {
+                "mergedBrief": {
+                    "mainGoal": "I want to make a mobile website",
+                    "targetUsers": ["customers"],
+                    "coreFeatures": ["mobile website"],
+                    "platforms": ["website"],
+                    "solutionType": "responsive website",
+                    "scopeDetails": "a website",
+                    "integrations": "none",
+                    "adminNeeds": "no admin dashboard",
+                    "deliverables": ["working website", "source code"],
+                }
+            }
+        )
+
+        self.assertFalse(result["isComplete"])
+        self.assertEqual(
+            result["missingFields"], ["mainGoal", "coreFeatures", "scopeDetails"]
         )
 
     def test_mobile_website_is_not_expanded_into_a_mobile_app(self):
