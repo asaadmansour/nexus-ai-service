@@ -69,6 +69,12 @@ class ProjectQuoteResponse(BaseModel):
 
 
 def estimate_project_quote(request: ProjectQuoteRequest) -> Dict[str, Any]:
+    if _is_minimal_website_scope(request.brief or {}):
+        return _fallback_quote(
+            request,
+            "A deterministic minimal-scope quote was used to prevent speculative work.",
+        )
+
     budget_min, budget_max = _budget_range(request.project)
     prompt = _build_prompt(request, budget_min, budget_max)
 
@@ -174,6 +180,14 @@ Rules:
 - Treat brief.requirementProfile and its cleaned feature list as authoritative for
   scope sizing. Ignore conversational questions, placeholders, uncertainty, and
   handover deliverables that may still appear in legacy summary or brief text.
+- Treat "mobile-friendly website", "mobile website", and "responsive website" as
+  one web platform, never as a separate native mobile application. Count a mobile
+  application only when the confirmed scope explicitly mentions iOS, Android,
+  native/cross-platform app development, Flutter, React Native, or app-store delivery.
+- Use brief.solutionType, brief.scopeDetails, brief.integrations, and
+  brief.adminNeeds as the primary sizing evidence. A single landing page with a few
+  sections, no integrations, and no admin area must receive minimal hours. Do not
+  add speculative ecommerce, authentication, dashboard, or mobile-app work.
 - Match this exact output schema:
 {schema_json}
 """
@@ -263,6 +277,9 @@ def _fallback_quote(request: ProjectQuoteRequest, reason: str) -> Dict[str, Any]
         if isinstance(requirement_profile, dict)
         else None
     )
+    if _is_minimal_website_scope(brief):
+        planning_complexity = "trivial"
+        platform_count = 1
     team_size = _to_number(brief.get("suggestedTeamSize")) or (
         1.0 if planning_complexity == "trivial" else 2.0
     )
@@ -313,6 +330,44 @@ def _fallback_quote(request: ProjectQuoteRequest, reason: str) -> Dict[str, Any]
         sources=["Nexus deterministic project quote fallback"],
     )
     return quote.model_dump()
+
+
+def _is_minimal_website_scope(brief: Dict[str, Any]) -> bool:
+    solution_type = _normalized_scope_text(brief.get("solutionType"))
+    platforms = _normalized_scope_text(brief.get("platforms"))
+    integrations = _normalized_scope_text(brief.get("integrations"))
+    admin_needs = _normalized_scope_text(brief.get("adminNeeds"))
+
+    minimal_solution = any(
+        marker in solution_type
+        for marker in ("landing page", "single page", "single-page", "static website")
+    )
+    explicit_native_app = any(
+        marker in f"{solution_type} {platforms}"
+        for marker in (
+            "mobile app",
+            "native app",
+            "ios app",
+            "android app",
+            "flutter",
+            "react native",
+        )
+    )
+    no_integrations = integrations in {"none", "no", "not needed", "n/a"} or bool(
+        re.search(r"\bno integrations?\b", integrations)
+    )
+    no_admin = admin_needs in {"none", "no", "not needed", "n/a"} or bool(
+        re.search(r"\bno admin(?: dashboard| area)?\b", admin_needs)
+    )
+    return minimal_solution and not explicit_native_app and no_integrations and no_admin
+
+
+def _normalized_scope_text(value: Any) -> str:
+    if isinstance(value, list):
+        value = " ".join(str(item) for item in value)
+    elif isinstance(value, dict):
+        value = " ".join(f"{key} {item}" for key, item in value.items())
+    return " ".join(str(value or "").lower().split())
 
 
 def _fallback_pricing_signals(request: ProjectQuoteRequest) -> List[str]:

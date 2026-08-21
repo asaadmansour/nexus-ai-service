@@ -1,8 +1,10 @@
 import unittest
 
 from app.agents.requirements.llm import (
+    _is_clearly_unrelated_question,
     _is_direct_prompt_injection,
     _normalize_llm_result,
+    _normalize_platforms_for_message,
     extract_requirements_with_llm,
 )
 from app.agents.requirements.nodes import check_missing_fields_node
@@ -55,6 +57,10 @@ class RequirementsSanitizationTests(unittest.TestCase):
                     "targetUsers": ["website visitors"],
                     "coreFeatures": ["Display Hello World"],
                     "platforms": ["website"],
+                    "solutionType": "single landing page",
+                    "scopeDetails": "one page with a heading",
+                    "integrations": "none",
+                    "adminNeeds": "no admin dashboard",
                     "deliverables": ["live link"],
                 }
             }
@@ -63,6 +69,50 @@ class RequirementsSanitizationTests(unittest.TestCase):
         self.assertTrue(result["isComplete"])
         self.assertEqual(result["missingFields"], [])
         self.assertEqual(result["completionPercentage"], 100)
+
+    def test_priceable_scope_details_are_required(self):
+        result = check_missing_fields_node(
+            {
+                "mergedBrief": {
+                    "mainGoal": "Display Hello World",
+                    "targetUsers": ["website visitors"],
+                    "coreFeatures": ["Display Hello World"],
+                    "platforms": ["website"],
+                    "deliverables": ["live link"],
+                }
+            }
+        )
+
+        self.assertFalse(result["isComplete"])
+        self.assertEqual(
+            result["missingFields"],
+            ["solutionType", "scopeDetails", "integrations", "adminNeeds"],
+        )
+
+    def test_mobile_website_is_not_expanded_into_a_mobile_app(self):
+        result = _normalize_platforms_for_message(
+            {
+                "extractedFields": {
+                    "platforms": ["website", "mobile app"],
+                    "solutionType": "responsive website",
+                },
+                "assistantReply": None,
+            },
+            "I need a mobile-friendly website",
+        )
+
+        self.assertEqual(result["extractedFields"]["platforms"], ["website"])
+
+    def test_explicit_native_app_is_not_removed(self):
+        result = _normalize_platforms_for_message(
+            {"extractedFields": {"platforms": ["website", "mobile app"]}},
+            "I need a responsive website and an Android mobile app",
+        )
+
+        self.assertEqual(
+            result["extractedFields"]["platforms"],
+            ["website", "mobile app"],
+        )
 
     def test_direct_prompt_injection_is_blocked_before_the_model(self):
         self.assertTrue(
@@ -80,6 +130,21 @@ class RequirementsSanitizationTests(unittest.TestCase):
         self.assertFalse(
             _is_direct_prompt_injection(
                 "I need a support chatbot with safe answers and an admin dashboard"
+            )
+        )
+
+    def test_obvious_trivia_is_blocked_before_the_model(self):
+        self.assertTrue(_is_clearly_unrelated_question("What is the capital of Egypt?"))
+        result = extract_requirements_with_llm(
+            {"latestMessage": "What is the capital of Egypt?"}
+        )
+        self.assertEqual(result["extractedFields"], {})
+        self.assertIn("unrelated trivia", result["assistantReply"])
+
+    def test_project_questions_are_not_blocked_by_scope_guard(self):
+        self.assertFalse(
+            _is_clearly_unrelated_question(
+                "What pages should my mobile-friendly website include?"
             )
         )
 

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from dotenv import load_dotenv
@@ -75,10 +76,21 @@ def extract_requirements_with_llm(state: RequirementsState) -> dict[str, Any]:
                 "achieve, and I’ll turn it into a clear requirement."
             ),
         }
+    if _is_clearly_unrelated_question(latest_message):
+        return {
+            "extractedFields": {},
+            "assistantReply": (
+                "I’m here to help define and price your project, so I can’t help "
+                "with unrelated trivia. Let’s continue with the project scope—what "
+                "should the first version let its users do?"
+            ),
+        }
     prompt = build_requirements_extraction_prompt(state)
     raw_text = _generate_json_text(prompt)
     parsed = _parse_json_object(raw_text)
-    return _normalize_llm_result(parsed)
+    return _normalize_platforms_for_message(
+        _normalize_llm_result(parsed), latest_message
+    )
 
 
 def _generate_json_text(prompt: str) -> str:
@@ -453,3 +465,96 @@ def _is_direct_prompt_injection(value: Any) -> bool:
         ("system prompt" in normalized or "hidden instruction" in normalized)
         and any(marker in normalized for marker in action_markers)
     )
+
+
+def _is_clearly_unrelated_question(value: Any) -> bool:
+    """Block obvious non-project requests before the requirements model can answer.
+
+    This is deliberately narrow. General words such as "what" or "how" are not
+    enough because customers legitimately ask those while shaping a project.
+    """
+    if not isinstance(value, str):
+        return False
+    normalized = " ".join(value.lower().split())
+    if not normalized:
+        return False
+
+    project_markers = (
+        "project",
+        "website",
+        "web app",
+        "mobile app",
+        "software",
+        "feature",
+        "screen",
+        "page",
+        "user",
+        "customer",
+        "admin",
+        "design",
+        "build",
+        "develop",
+        "price",
+        "cost",
+        "budget",
+        "deadline",
+        "integration",
+        "payment",
+        "login",
+        "dashboard",
+    )
+    if any(marker in normalized for marker in project_markers):
+        return False
+
+    unrelated_patterns = (
+        r"\b(?:what|which)\s+(?:is|was)\s+the\s+capital\s+of\b",
+        r"\bwho\s+(?:is|was)\s+(?:the\s+)?(?:president|king|queen|prime minister)\b",
+        r"\b(?:weather|temperature|forecast)\s+(?:in|for|today|tomorrow)\b",
+        r"\b(?:football|soccer|basketball|tennis)\s+(?:score|result|standings)\b",
+        r"\b(?:stock|crypto|bitcoin|ethereum)\s+price\b",
+        r"\b(?:tell|write)\s+(?:me\s+)?(?:a\s+)?(?:joke|poem|story|song)\b",
+        r"\b(?:recipe|cooking instructions)\s+for\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in unrelated_patterns)
+
+
+def _normalize_platforms_for_message(
+    result: dict[str, Any], latest_message: Any
+) -> dict[str, Any]:
+    if not isinstance(latest_message, str):
+        return result
+    normalized = " ".join(latest_message.lower().split())
+    website_only = any(
+        phrase in normalized
+        for phrase in (
+            "mobile website",
+            "mobile-friendly website",
+            "mobile friendly website",
+            "responsive website",
+            "responsive web site",
+        )
+    )
+    explicit_app = any(
+        marker in normalized
+        for marker in (
+            "mobile app",
+            "native app",
+            "ios app",
+            "android app",
+            "app store",
+            "play store",
+            "flutter",
+            "react native",
+        )
+    )
+    if not website_only or explicit_app:
+        return result
+
+    fields = result.get("extractedFields")
+    if not isinstance(fields, dict):
+        return result
+    normalized_fields = dict(fields)
+    normalized_fields["platforms"] = ["website"]
+    normalized_result = dict(result)
+    normalized_result["extractedFields"] = normalized_fields
+    return normalized_result

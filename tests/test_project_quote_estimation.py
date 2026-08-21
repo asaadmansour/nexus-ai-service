@@ -1,7 +1,11 @@
 import unittest
 from unittest.mock import patch
 
-from app.agents.project_quote_estimation import ProjectQuoteRequest, _fallback_quote
+from app.agents.project_quote_estimation import (
+    ProjectQuoteRequest,
+    _fallback_quote,
+    _is_minimal_website_scope,
+)
 
 
 class ProjectQuoteEstimationTests(unittest.TestCase):
@@ -51,6 +55,44 @@ class ProjectQuoteEstimationTests(unittest.TestCase):
         self.assertEqual(quote["quoteStatus"], "pending_customer")
         self.assertEqual(quote["budgetGap"], 0)
         self.assertEqual(quote["amount"], quote["recommendedMinimum"])
+
+    def test_mobile_friendly_landing_page_uses_minimal_scope(self):
+        brief = {
+            "solutionType": "mobile-friendly landing page",
+            "platforms": ["website"],
+            "scopeDetails": "one page with five static sections",
+            "integrations": "none",
+            "adminNeeds": "no admin dashboard",
+            "coreFeatures": ["marketing content", "contact details"],
+            "deliverables": ["source code", "live link"],
+        }
+
+        self.assertTrue(_is_minimal_website_scope(brief))
+        quote = _fallback_quote(
+            ProjectQuoteRequest(
+                project={"budgetMin": 500, "budgetMax": 100_000, "currency": "EGP"},
+                brief=brief,
+            ),
+            "fallback",
+        )
+
+        implementation = next(
+            row for row in quote["roleEstimates"] if row["roleKey"] == "implementation"
+        )
+        self.assertEqual(implementation["hoursEach"], 8)
+        self.assertEqual(quote["complexity"], "low")
+
+    def test_native_mobile_app_is_not_minimal_website_scope(self):
+        self.assertFalse(
+            _is_minimal_website_scope(
+                {
+                    "solutionType": "landing page and Android mobile app",
+                    "platforms": ["website", "mobile app"],
+                    "integrations": "none",
+                    "adminNeeds": "none",
+                }
+            )
+        )
 
 
 if __name__ == "__main__":

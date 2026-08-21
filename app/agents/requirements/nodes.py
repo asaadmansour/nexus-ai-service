@@ -8,6 +8,10 @@ USER_REQUIRED_BRIEF_FIELDS = [
     "targetUsers",
     "coreFeatures",
     "platforms",
+    "solutionType",
+    "scopeDetails",
+    "integrations",
+    "adminNeeds",
     "deliverables",
 ]
 
@@ -18,6 +22,10 @@ QUESTION_BY_FIELD = {
     "targetUsers": "Got it. Who will use it, and what should each group be able to do? For example customers place orders, staff manage stock, and admins track sales.",
     "coreFeatures": "Great. What are the must-have features for the first version? Short bullets are fine, like online payments, product catalog, order tracking, dashboard, notifications, or stock management.",
     "platforms": "Makes sense. Where should this run: website, mobile app, admin dashboard, or all of them? If you are not sure, tell me how people will use it and I will help translate that.",
+    "solutionType": "To price this correctly, which best describes what you need: a single landing page, a multi-page marketing website, a web application, or a real iOS/Android mobile app? A mobile-friendly website still counts as a website.",
+    "scopeDetails": "What should the first version contain? A rough page or screen count plus the main user journey is enough—for example, one landing page with five sections, or ten screens covering signup, browsing, checkout, and order tracking.",
+    "integrations": "Does the first version connect to anything external, such as payments, maps, email/SMS, social login, analytics, or an existing system? You can simply say \"none\".",
+    "adminNeeds": "Will your team need a private admin area to manage content, users, orders, or reports? If not, say \"no admin dashboard\".",
     "deliverables": "Good. What final things should be handed over when the work is done? For example a working website, mobile app, admin dashboard, source code, deployment/setup help, or simply \"not sure\".",
     "constraintsPreferences": "Any preferences or constraints we should respect? This can be simple: colors, style, payment provider, delivery rules, integrations, language, or things you want to avoid.",
     "clientBackground": "To guide this properly, what is your background here? For example business owner, operations, non-technical founder, technical founder, or something else.",
