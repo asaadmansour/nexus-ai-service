@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 GENAI_TIMEOUT = 60.0
-PROMPT_VERSION = "planning-artifact-evaluator-v3-adaptive"
+PROMPT_VERSION = "planning-artifact-evaluator-v7-derived-score"
 INLINE_MEDIA_LIMIT = 18 * 1024 * 1024
 
 
@@ -290,7 +290,12 @@ def _normalize_evaluation(
         for check in checks
         if check.mandatory and check.status not in {"met", "not_applicable"}
     ]
-    raw_score = _bounded_score(raw_result.get("score"), checks)
+    # Derive the score from the checks rather than trusting the model's own number.
+    # It reported 10/100 on a submission where it had itself marked seven of twelve
+    # requirements "met" — a figure that contradicted its own findings and gave the
+    # freelancer no usable signal. The statuses are the evidence; the score should
+    # follow them. See ISSUES.md #31.
+    raw_score = _bounded_score(None, checks)
     score = min(raw_score, 69.0) if blockers else raw_score
     requested_recommendation = raw_result.get("recommendation")
     if blockers or score < 80:
@@ -385,9 +390,20 @@ def _bounded_score(value: Any, checks: List[RequirementCheck]) -> float:
     try:
         score = float(value)
     except (TypeError, ValueError):
+        # Partial work must not score the same as nothing. Previously only "met"
+        # counted, so a submission addressing every requirement thinly scored 0.00 —
+        # identical to one describing an entirely different product, which gave the
+        # freelancer no signal that they had improved. See ISSUES.md #31.
         applicable = [check for check in checks if check.status != "not_applicable"]
-        met = sum(1 for check in applicable if check.status == "met")
-        score = (met / len(applicable) * 100) if applicable else 100
+        earned = sum(
+            1.0
+            if check.status == "met"
+            else 0.5
+            if check.status == "partial"
+            else 0.0
+            for check in applicable
+        )
+        score = (earned / len(applicable) * 100) if applicable else 100
     return round(max(0, min(100, score)), 2)
 
 
@@ -534,8 +550,25 @@ Rules:
 - Return exactly one check for every input requirement, using its exact key and title.
 - "met" means the evidence is project-specific, complete, internally consistent, and
   sufficient for another freelancer to implement independently.
-- Use "partial" when details exist but are incomplete, "missing" when absent or too
-  vague, and "conflict" when inconsistent with the brief or approved architecture.
+- Judge each requirement primarily on ITS OWN written answer in
+  submission.content.requirementEvidence[key].summary, plus any artifact mapped to that
+  same key. Extracted artifact text is supporting material, never the submission itself.
+- An artifact that turns out to be irrelevant affects ONLY the requirements it is mapped
+  to. Never let one wrong or off-topic artifact make you report other requirements as
+  missing, undocumented, or the submission as a whole as unrelated: assess each
+  requirement's own answer on its merits.
+- A requirement whose "requiresUrl" is false is answered by the written summary itself.
+  That text IS the evidence for it — judge it on substance and never report it as
+  "missing" or "no documentation provided" when a project-specific summary was supplied.
+  Only requirements with "requiresUrl": true need an inspected artifact to reach "met".
+- Use "partial" when the requirement is addressed but the detail is thin, generic, or
+  defers decisions ("to be finalised later"). Partial is the correct verdict whenever the
+  freelancer engaged with the requirement for this project but did not finish it.
+- Use "missing" only when the requirement is genuinely unaddressed: no summary, no
+  artifact, nothing to assess. Content that exists but is inadequate is "partial", never
+  "missing" — the difference tells the freelancer whether they made progress.
+- Use "conflict" when the content contradicts the brief or approved architecture, for
+  example describing a different product, platform, or integration than the one confirmed.
 - Use "not_applicable" only when the freelancer selected that disposition, the input
   requirement allows it, and the justification is consistent with the confirmed brief,
   approved architecture, and actual artifacts. Otherwise use "conflict" and explain why.
@@ -543,6 +576,10 @@ Rules:
   a revision. Every mandatory partial/missing/conflict is a blocker and requires revision.
 - Never add checklist categories that are absent from the input requirements, and never
   promote questions, examples, uncertainty, or deliverable labels into project features.
+- Score the submission so it reflects how much usable work exists: a "met" requirement
+  earns full credit, "partial" earns roughly half, and "missing" or "conflict" earn none.
+  A submission that addresses every requirement thinly must score clearly higher than one
+  describing the wrong product, even though both still require revision.
 - Do not approve with any blocker or score below 80.
 - Feedback and revisionItems must say exactly what artifact or contract detail to add.
 - Artifact URLs have been acquired by the trusted inspector. Only artifacts whose manifest

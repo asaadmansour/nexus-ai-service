@@ -125,6 +125,10 @@ def _normalize_quote_response(
     quote.amount = quote.recommendedMinimum
     quote.budgetGap = _round_money(max(quote.recommendedMinimum - budget_max, 0))
     quote.currency = quote.currency or _currency(request.project)
+    # Guard against a quote whose numbers are in a different currency than the
+    # label says. Raising here drops through to the deterministic fallback rather
+    # than showing a customer a price that is wrong by an exchange rate.
+    _assert_rates_plausible(quote, quote.currency)
     quote.quoteStatus = "out_of_budget" if quote.budgetGap > 0 else "pending_customer"
     if not quote.rationale.strip():
         quote.rationale = "Estimated from the confirmed requirements and budget range."
@@ -133,6 +137,54 @@ def _normalize_quote_response(
     if not quote.pricingSignals:
         quote.pricingSignals = _fallback_pricing_signals(request)
     return quote
+
+
+# Plausible hourly rates per currency, used to catch a quote priced in the wrong
+# currency. A quote once returned rates ~18.6x too high because the model
+# converted USD to EGP but the platform labelled the result USD, producing a
+# 275,555 USD quote for a 15,000 USD project. Anything outside these bands is
+# treated as a failed generation and falls back to the deterministic estimate.
+# Override with QUOTE_RATE_BANDS, e.g. "USD:15-400,EGP:200-8000".
+_DEFAULT_RATE_BANDS = {
+    "USD": (15.0, 400.0),
+    "EUR": (15.0, 400.0),
+    "GBP": (15.0, 400.0),
+    "EGP": (200.0, 8000.0),
+}
+
+
+def _rate_bands() -> Dict[str, tuple]:
+    raw = os.getenv("QUOTE_RATE_BANDS", "").strip()
+    if not raw:
+        return dict(_DEFAULT_RATE_BANDS)
+    bands = dict(_DEFAULT_RATE_BANDS)
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        code, _, span = entry.partition(":")
+        low, _, high = span.partition("-")
+        try:
+            bands[code.strip().upper()] = (float(low), float(high))
+        except ValueError:
+            continue
+    return bands
+
+
+def _assert_rates_plausible(quote: ProjectQuoteResponse, currency: str) -> None:
+    """Rejects a quote whose hourly rates cannot be in the stated currency."""
+    band = _rate_bands().get(currency.upper())
+    if not band:
+        return
+    low, high = band
+    for estimate in quote.roleEstimates:
+        rate = float(estimate.hourlyRate)
+        if rate < low or rate > high:
+            raise ProjectQuoteEstimationError(
+                f"{estimate.role} hourly rate {rate:.2f} is outside the plausible "
+                f"range for {currency} ({low:.0f}-{high:.0f}). The quote was most "
+                f"likely priced in a different currency."
+            )
 
 
 def _build_prompt(request: ProjectQuoteRequest) -> str:
@@ -152,8 +204,18 @@ def _build_prompt(request: ProjectQuoteRequest) -> str:
     )
     schema_json = json.dumps(ProjectQuoteResponse.model_json_schema(), indent=2)
 
+    quote_currency = _currency(request.project)
+
     return f"""
 You are the Nexus AI project quote estimator.
+
+CURRENCY — READ FIRST:
+Every monetary value you return MUST be expressed in {quote_currency}. That
+includes each roleEstimates[].hourlyRate, each subtotal, amount, and
+recommendedMinimum. Do NOT convert between currencies. Do NOT quote rates in one
+currency in your prose and a different currency in the numeric fields. If you
+reason about market rates sourced in another currency, convert them once, state
+the converted figure, and use {quote_currency} everywhere thereafter.
 
 Goal:
 Estimate the final escrow price for the whole project after requirements are
@@ -177,6 +239,8 @@ Rules:
   The implementation row may contain multiple people. Its subtotal is
   people × hoursEach × hourlyRate.
 - The amount is a customer-facing final estimate, not an hourly rate.
+- Every rate and total is in {quote_currency}. State {quote_currency} explicitly
+  in `rationale` and `assumptions` so the figures cannot be misread.
 - Include architecture and UI/UX planning effort because those stages are mandatory,
   but scale their effort to the actual complexity. A trivial single-screen project gets
   a minimal planning package, not enterprise architecture and prototype pricing.

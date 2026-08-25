@@ -14,6 +14,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
+# Largest a single task may be before it must be split. Not a template — it caps
+# granularity, not plan size: a small project still gets a small plan, a large one
+# gets more small tasks instead of a few enormous ones. See ISSUES.md #32.
+MAX_TASK_HOURS = int(os.getenv("PLAN_MAX_TASK_HOURS", "40"))
+# How many corrective rounds the model gets before generation fails. Strict rules
+# interact: fixing coverage can create an empty milestone, which needs another pass.
+MAX_PLAN_REPAIR_ATTEMPTS = int(os.getenv("PLAN_MAX_REPAIR_ATTEMPTS", "3"))
 DEFAULT_TIMEOUT_MS = 300000
 PROJECT_PLAN_SYSTEM_PROMPT = """
 You are the Nexus Scrum Master planning agent. Create implementation plans only
@@ -80,6 +87,10 @@ class Task(BaseModel):
     acceptanceCriteria: List[str] = Field(default_factory=list)
     contractReferences: List[str] = Field(default_factory=list)
     ownedPaths: List[str] = Field(default_factory=list)
+    # Confirmed brief features this task delivers, copied verbatim from the
+    # brief. Declared by the model so coverage can be checked deterministically
+    # instead of trusting a prompt instruction. See ISSUES.md #32.
+    deliversFeatures: List[str] = Field(default_factory=list)
     integrationChecks: List[str] = Field(default_factory=list)
     checkpoints: List[TaskCheckpoint] = Field(min_length=2)
     status: Optional[str] = "todo"
@@ -172,7 +183,22 @@ class ProjectPlanRequest(BaseModel):
 
 # ── Validation Helper ──────────────────────────────────────────────────
 
-def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
+def _confirmed_features(request: "ProjectPlanRequest") -> List[str]:
+    """The brief's confirmed feature list, however the backend spelled the key."""
+    brief = request.brief or {}
+    for key in ("coreFeatures", "core_features", "features"):
+        value = brief.get(key)
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            return [part.strip() for part in value.split(",") if part.strip()]
+    return []
+
+
+def validate_and_normalize_plan(
+    data: Dict[str, Any],
+    confirmed_features: Optional[List[str]] = None,
+) -> ProjectPlanResponse:
     for index, raw_task in enumerate(data.get("tasks") or []):
         if not isinstance(raw_task, dict) or raw_task.get("checkpoints"):
             continue
@@ -199,68 +225,131 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
     except ValidationError as e:
         raise ProjectPlanGenerationError(f"Response validation failed: {e}")
 
+    # Report every problem at once. Raising on the first one made repair a
+    # whack-a-mole: each corrective round fixed the single error it was told
+    # about and dropped a different required field, so generation never
+    # converged. See ISSUES.md #32.
+    errors: List[str] = []
+
     milestone_keys = {m.clientKey for m in plan.milestones}
     task_keys = {t.clientKey for t in plan.tasks}
 
     if len(milestone_keys) != len(plan.milestones):
-        raise ProjectPlanGenerationError("Duplicate milestone clientKey found.")
+        errors.append(
+            "Duplicate milestone clientKey found."
+        )
     if len(task_keys) != len(plan.tasks):
-        raise ProjectPlanGenerationError("Duplicate task clientKey found.")
+        errors.append(
+            "Duplicate task clientKey found."
+        )
     if not plan.milestones or not plan.tasks:
-        raise ProjectPlanGenerationError("Plan must include milestones and implementation tasks.")
+        errors.append(
+            "Plan must include milestones and implementation tasks."
+        )
+
+    # A milestone with no tasks is scope nobody will ever build. A generated plan
+    # once contained a "Payments and Admin" milestone with zero tasks, so the
+    # Stripe checkout the customer had paid escrow for was simply never planned.
+    # Raising here feeds the existing corrective-retry loop. See ISSUES.md #32.
+    milestones_without_tasks = [
+        milestone.clientKey
+        for milestone in plan.milestones
+        if not any(
+            task.milestoneClientKey == milestone.clientKey for task in plan.tasks
+        )
+    ]
+    if milestones_without_tasks:
+        errors.append(
+            "Every milestone must contain at least one task. These have none: "
+            + ", ".join(milestones_without_tasks
+        )
+            + ". Add the tasks that deliver each milestone's scope, or remove the milestone."
+        )
+
+    # Every confirmed feature must be delivered by some task. A plan once shipped
+    # with cart, payments, order tracking and the admin area unplanned while its
+    # own summary claimed to cover them. Prompt instructions alone did not hold,
+    # so coverage is verified here. See ISSUES.md #32.
+    if confirmed_features:
+        declared = {
+            feature.strip().lower()
+            for task in plan.tasks
+            for feature in (task.deliversFeatures or [])
+            if feature and feature.strip()
+        }
+        uncovered = [
+            feature
+            for feature in confirmed_features
+            if feature.strip() and feature.strip().lower() not in declared
+        ]
+        if uncovered:
+            errors.append(
+            "Every confirmed product feature must be delivered by at least one task. "
+                "These are not covered by any task: "
+                + "; ".join(uncovered
+        )
+                + ". Add the tasks that build them and list each feature verbatim in "
+                "that task's deliversFeatures."
+            )
 
     for task in plan.tasks:
         if task.milestoneClientKey not in milestone_keys:
-            raise ProjectPlanGenerationError(
-                f"Task '{task.clientKey}' references non-existent milestone '{task.milestoneClientKey}'"
-            )
+            errors.append(
+            f"Task '{task.clientKey}' references non-existent milestone '{task.milestoneClientKey}'"
+        )
+        if task.estimatedHours > MAX_TASK_HOURS:
+            errors.append(
+            f"Task '{task.clientKey}' is {task.estimatedHours} estimated hours, above the "
+                f"{MAX_TASK_HOURS}-hour limit for a single task. Split it into separate "
+                "deliverable outcomes rather than bundling features together."
+        )
         if not task.acceptanceCriteria:
-            raise ProjectPlanGenerationError(
-                f"Task '{task.clientKey}' has no acceptance criteria."
-            )
+            errors.append(
+            f"Task '{task.clientKey}' has no acceptance criteria."
+        )
         if not task.contractReferences:
-            raise ProjectPlanGenerationError(
-                f"Task '{task.clientKey}' has no approved contract references."
-            )
+            errors.append(
+            f"Task '{task.clientKey}' has no approved contract references."
+        )
         if not task.ownedPaths and not _is_read_only_verification_task(task):
-            raise ProjectPlanGenerationError(
-                f"Task '{task.clientKey}' has no ownership boundary."
-            )
+            errors.append(
+            f"Task '{task.clientKey}' has no ownership boundary."
+        )
         if not task.integrationChecks:
-            raise ProjectPlanGenerationError(
-                f"Task '{task.clientKey}' has no integration checks."
-            )
+            errors.append(
+            f"Task '{task.clientKey}' has no integration checks."
+        )
         if len({checkpoint.key for checkpoint in task.checkpoints}) != len(
             task.checkpoints
         ):
-            raise ProjectPlanGenerationError(
-                f"Task '{task.clientKey}' has duplicate checkpoint keys."
-            )
+            errors.append(
+            f"Task '{task.clientKey}' has duplicate checkpoint keys."
+        )
         if any(
             checkpoint.offsetDays > task.durationDays
             for checkpoint in task.checkpoints
         ):
-            raise ProjectPlanGenerationError(
-                f"Task '{task.clientKey}' has a checkpoint after its due date."
-            )
+            errors.append(
+            f"Task '{task.clientKey}' has a checkpoint after its due date."
+        )
         checkpoint_weight = sum(
             checkpoint.weightPercent for checkpoint in task.checkpoints
         )
         if abs(checkpoint_weight - 100) > 0.01:
-            raise ProjectPlanGenerationError(
-                f"Task '{task.clientKey}' checkpoint weights must total 100."
-            )
+            errors.append(
+            f"Task '{task.clientKey}' checkpoint weights must total 100."
+        )
 
     for milestone in plan.milestones:
         if not milestone.acceptanceCriteria:
-            raise ProjectPlanGenerationError(
-                f"Milestone '{milestone.clientKey}' has no acceptance criteria."
-            )
+            errors.append(
+            f"Milestone '{milestone.clientKey}' has no acceptance criteria."
+        )
 
     planned_roles = {role.roleKey for role in plan.teamPlan.recommendedRoles}
     missing_roles = sorted({task.roleKey for task in plan.tasks} - planned_roles)
     if missing_roles:
-        raise ProjectPlanGenerationError(
+        errors.append(
             f"Team plan is missing task roles: {', '.join(missing_roles)}."
         )
 
@@ -275,41 +364,41 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
         if value.applicable is False:
             reason = str(value.reason or "").strip()
             if len(reason) < 20:
-                raise ProjectPlanGenerationError(
-                    f"Project specification N/A section '{name}' needs a concrete reason."
-                )
+                errors.append(
+            f"Project specification N/A section '{name}' needs a concrete reason."
+        )
         elif not str(value.summary or "").strip() and not value.decisions:
-            raise ProjectPlanGenerationError(
-                f"Project specification section '{name}' needs approved decisions."
-            )
+            errors.append(
+            f"Project specification section '{name}' needs approved decisions."
+        )
 
     all_task_keys = task_keys
     tasks_by_key = {task.clientKey: task for task in plan.tasks}
     dependency_pairs = set()
     for dep in plan.dependencies:
         if dep.taskClientKey not in all_task_keys:
-            raise ProjectPlanGenerationError(
-                f"Dependency references unknown task '{dep.taskClientKey}'"
-            )
+            errors.append(
+            f"Dependency references unknown task '{dep.taskClientKey}'"
+        )
         if dep.dependsOnTaskClientKey not in all_task_keys:
-            raise ProjectPlanGenerationError(
-                f"Dependency references unknown task '{dep.dependsOnTaskClientKey}'"
-            )
+            errors.append(
+            f"Dependency references unknown task '{dep.dependsOnTaskClientKey}'"
+        )
         pair = (dep.taskClientKey, dep.dependsOnTaskClientKey, dep.dependencyType)
         if pair in dependency_pairs:
-            raise ProjectPlanGenerationError(
-                f"Duplicate dependency found for task '{dep.taskClientKey}'."
-            )
+            errors.append(
+            f"Duplicate dependency found for task '{dep.taskClientKey}'."
+        )
         dependency_pairs.add(pair)
         if dep.dependencyType in {"blocks", "after"}:
             task = tasks_by_key[dep.taskClientKey]
             prerequisite = tasks_by_key[dep.dependsOnTaskClientKey]
             prerequisite_end = prerequisite.startDay + prerequisite.durationDays
             if task.startDay < prerequisite_end:
-                raise ProjectPlanGenerationError(
-                    f"Task '{task.clientKey}' starts before blocking dependency "
+                errors.append(
+            f"Task '{task.clientKey}' starts before blocking dependency "
                     f"'{prerequisite.clientKey}' finishes."
-                )
+        )
 
     # Detect cycles
     graph = {key: [] for key in all_task_keys}
@@ -334,9 +423,17 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> ProjectPlanResponse:
     for node in all_task_keys:
         if node not in visited:
             if has_cycle(node):
-                raise ProjectPlanGenerationError(
-                    f"Circular dependency detected involving task '{node}'"
-                )
+                errors.append(
+            f"Circular dependency detected involving task '{node}'"
+        )
+
+    if errors:
+        raise ProjectPlanGenerationError(
+            "The plan failed "
+            + str(len(errors))
+            + " validation rule(s). Fix all of them in one corrected plan:\n- "
+            + "\n- ".join(errors)
+        )
 
     return plan
 
@@ -387,24 +484,48 @@ def generate_project_plan(request: ProjectPlanRequest) -> Dict[str, Any]:
         result = _response_payload(response)
         if result is None:
             raise ProjectPlanGenerationError("Empty response from AI.")
-        try:
-            validated_plan = validate_and_normalize_plan(result)
-        except ProjectPlanGenerationError as validation_error:
-            logger.warning(
-                "Gemini project plan failed deterministic validation; requesting one repair: %s",
-                validation_error,
-            )
-            repair_response, repair_model = _generate_plan_response(
-                client,
-                _build_repair_prompt(prompt, result, validation_error),
-            )
-            repaired_result = _response_payload(repair_response)
-            if repaired_result is None:
-                raise ProjectPlanGenerationError(
-                    "AI returned an empty project-plan repair."
+        # Validation is deterministic and strict, so a single repair is not enough:
+        # fixing one rule often breaks another (adding the missing feature tasks
+        # introduced a new empty milestone, and generation then gave up entirely).
+        # Repair iteratively, feeding each new error back. See ISSUES.md #32.
+        confirmed_features = _confirmed_features(request)
+        candidate = result
+        validated_plan = None
+        last_error: Optional[ProjectPlanGenerationError] = None
+
+        for attempt in range(MAX_PLAN_REPAIR_ATTEMPTS + 1):
+            try:
+                validated_plan = validate_and_normalize_plan(
+                    candidate, confirmed_features
                 )
-            validated_plan = validate_and_normalize_plan(repaired_result)
-            model = repair_model
+                break
+            except ProjectPlanGenerationError as validation_error:
+                last_error = validation_error
+                if attempt >= MAX_PLAN_REPAIR_ATTEMPTS:
+                    break
+                logger.warning(
+                    "Plan failed deterministic validation (repair %s/%s): %s",
+                    attempt + 1,
+                    MAX_PLAN_REPAIR_ATTEMPTS,
+                    validation_error,
+                )
+                repair_response, repair_model = _generate_plan_response(
+                    client,
+                    _build_repair_prompt(prompt, candidate, validation_error),
+                )
+                repaired_result = _response_payload(repair_response)
+                if repaired_result is None:
+                    raise ProjectPlanGenerationError(
+                        "AI returned an empty project-plan repair."
+                    )
+                candidate = repaired_result
+                model = repair_model
+
+        if validated_plan is None:
+            raise ProjectPlanGenerationError(
+                f"Plan still invalid after {MAX_PLAN_REPAIR_ATTEMPTS} repair attempts: {last_error}"
+            )
+
         logger.info("Generated project plan with Gemini model '%s'", model)
         return validated_plan.model_dump()
 
@@ -475,6 +596,19 @@ Important rules:
   submission. Scale the milestone count, task count, team size, documentation, testing,
   and operational work to trivial, standard, or complex scope. A static Hello World page
   should remain a tiny plan, not become a multi-service product.
+- Scaling controls HOW MUCH work each feature gets, never WHETHER it is planned.
+  Every confirmed product feature in the brief must be delivered by at least one task,
+  and every milestone must contain at least one task. A feature with no task will never
+  be built, never invoiced and never noticed — that is a defect, not a small plan.
+  Before returning, check each confirmed feature against your task list and add any that
+  are unplanned. Integrations the brief confirms, such as card payments, are features.
+- Every task must list, in `deliversFeatures`, the confirmed brief features it delivers,
+  copied verbatim from the brief's feature list. Setup or infrastructure tasks that
+  deliver no user-facing feature may leave it empty. Every confirmed feature must appear
+  in at least one task's `deliversFeatures`; this is checked and the plan is rejected if
+  any feature is missing.
+- Assign implementation work to implementation roles. The architect and UI/UX roles
+  produce contracts and designs; they must not be given the whole build.
 - Every task must include concrete `contractReferences` pointing to the relevant
   API/design/data evidence and `integrationChecks` that another freelancer can run.
   Tasks that change code or assets must include concrete `ownedPaths` establishing a
@@ -482,6 +616,14 @@ Important rules:
   use an empty `ownedPaths` list; identify it clearly as read-only and do not invent a path.
 - Split tasks so freelancers can work in parallel against the approved contracts. Add a
   dependency only when work truly cannot begin independently.
+- One task is one deliverable outcome that a single freelancer can finish and hand over.
+  Do not bundle several confirmed features into one task: "Implement catalogue and
+  search" is two tasks, not one. A task nobody could review as a single piece of work,
+  or that would keep one person busy for most of a milestone, is too big — split it.
+  This is about granularity, not volume: a two-feature project still gets a two-task
+  plan, and a large project gets many small tasks rather than a few enormous ones.
+- Keep each task at or below {MAX_TASK_HOURS} estimated hours. If the work genuinely
+  needs more, it is more than one task.
 - The project specification must preserve applicable approved architecture, design,
   API, data, and convention decisions in implementation-ready detail. For a section the
   approved deliverables explicitly establish as not applicable, return

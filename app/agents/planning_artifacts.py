@@ -24,9 +24,15 @@ from typing import Any, Dict, Iterable, List, Tuple
 MAX_URLS = int(os.getenv("EVALUATION_MAX_ARTIFACTS", "30"))
 MAX_FILE_BYTES = int(os.getenv("EVALUATION_MAX_FILE_BYTES", str(50 * 1024 * 1024)))
 MAX_TOTAL_BYTES = int(os.getenv("EVALUATION_MAX_TOTAL_BYTES", str(100 * 1024 * 1024)))
-MAX_TEXT_BYTES = int(os.getenv("EVALUATION_MAX_TEXT_BYTES", str(250 * 1024)))
+# Artifact text is supporting evidence, not the submission. One 324 KB GitHub page
+# attached as an "architecture diagram" buried twelve one-line requirement answers
+# and the evaluator reported the whole submission as unrelated and undocumented —
+# including the nine requirements that never referenced that artifact.
+# These caps keep artifact text large enough to judge relevance but small enough
+# that it cannot drown the freelancer's own answers. See ISSUES.md #31.
+MAX_TEXT_BYTES = int(os.getenv("EVALUATION_MAX_TEXT_BYTES", str(40 * 1024)))
 MAX_EXTRACTED_TEXT_CHARS = int(
-    os.getenv("EVALUATION_MAX_EXTRACTED_TEXT_CHARS", "1000000")
+    os.getenv("EVALUATION_MAX_EXTRACTED_TEXT_CHARS", "120000")
 )
 MAX_FIGMA_FRAMES = int(os.getenv("EVALUATION_MAX_FIGMA_FRAMES", "20"))
 MAX_FIGMA_STRUCTURE_FRAMES = int(
