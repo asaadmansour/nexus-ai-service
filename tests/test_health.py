@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from main import (
+    health,
     is_ai_provider_configured,
     is_figma_provider_configured,
     is_figma_smoke_configured,
@@ -19,6 +20,14 @@ class AiServiceHealthTests(unittest.TestCase):
     def test_provider_is_ready_with_a_non_placeholder_key(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=True):
             self.assertTrue(is_ai_provider_configured())
+
+    def test_optional_figma_does_not_make_gemini_health_unavailable(self):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=True):
+            result = health()
+            self.assertIsInstance(result, dict)
+            self.assertEqual(result["status"], "ok")
+            self.assertTrue(result["aiProviderConfigured"])
+            self.assertFalse(result["checks"]["figma"])
 
     def test_figma_provider_requires_a_non_placeholder_token(self):
         for value, expected in ((None, False), ("change-me", False), ("token", True)):

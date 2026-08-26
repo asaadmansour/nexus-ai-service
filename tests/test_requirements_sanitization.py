@@ -2,6 +2,8 @@ import unittest
 from unittest.mock import patch
 
 from app.agents.requirements.llm import (
+    _build_generation_config,
+    _extract_explicit_labeled_fields,
     _is_clearly_unrelated_question,
     _is_direct_prompt_injection,
     _normalize_llm_result,
@@ -17,6 +19,39 @@ from app.agents.requirements.nodes import (
 
 
 class RequirementsSanitizationTests(unittest.TestCase):
+    def test_requirements_output_budget_is_large_enough_for_a_complete_brief(self):
+        with patch.dict(
+            "os.environ",
+            {"GEMINI_REQUIREMENTS_MAX_OUTPUT_TOKENS": "512"},
+            clear=True,
+        ):
+            self.assertEqual(_build_generation_config()["max_output_tokens"], 2048)
+
+    def test_zero_legacy_thinking_budget_is_omitted(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "GEMINI_REQUIREMENTS_THINKING_BUDGET": "0",
+                "GEMINI_THINKING_BUDGET": "0",
+            },
+            clear=True,
+        ):
+            self.assertNotIn("thinking_config", _build_generation_config())
+
+    def test_thinking_level_uses_the_supported_nested_config(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "GEMINI_REQUIREMENTS_THINKING_LEVEL": "low",
+                "GEMINI_REQUIREMENTS_THINKING_BUDGET": "512",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                _build_generation_config()["thinking_config"],
+                {"thinking_level": "low", "include_thoughts": False},
+            )
+
     def test_questions_and_placeholders_are_not_stored_as_requirements(self):
         result = _normalize_llm_result(
             {
@@ -38,6 +73,69 @@ class RequirementsSanitizationTests(unittest.TestCase):
                 "deliverables": ["live link", "documentation"],
             },
         )
+
+    def test_complete_labelled_questionnaire_is_extracted_in_one_message(self):
+        fields = _extract_explicit_labeled_fields(
+            """
+Main goal: Increase bakery orders through WhatsApp.
+Target users: Local customers in Cairo.
+Core features: Hero, product gallery, prices, WhatsApp order button, location.
+Platforms: Responsive website.
+Solution type: Single landing page.
+Scope details: One page with five sections from browsing products to contacting us.
+Integrations: WhatsApp and Google Maps.
+Admin needs: No admin dashboard.
+Deliverables: Working website, source code, and live link.
+"""
+        )
+
+        self.assertEqual(
+            set(fields),
+            {
+                "mainGoal",
+                "targetUsers",
+                "coreFeatures",
+                "platforms",
+                "solutionType",
+                "scopeDetails",
+                "integrations",
+                "adminNeeds",
+                "deliverables",
+            },
+        )
+
+    @patch("app.agents.requirements.nodes.extract_requirements_with_llm")
+    def test_complete_one_message_stops_instead_of_asking_again(self, mocked_extract):
+        mocked_extract.return_value = {
+            "extractedFields": {
+                "mainGoal": "Increase bakery orders through WhatsApp",
+                "targetUsers": "local customers in Cairo",
+                "coreFeatures": ["product gallery", "WhatsApp order button"],
+                "platforms": ["responsive website"],
+                "solutionType": "single landing page",
+                "scopeDetails": "one page with five sections",
+                "integrations": ["WhatsApp", "Google Maps"],
+                "adminNeeds": "no admin dashboard",
+                "deliverables": ["working website", "source code", "live link"],
+            },
+            # Even if a model incorrectly asks one more question, validated graph
+            # state owns completion and must end the interview.
+            "assistantReply": "What else would you like to add?",
+        }
+
+        result = requirements_graph.invoke(
+            {
+                "latestMessage": "Here are all of my requirements.",
+                "currentBrief": {},
+            }
+        )
+
+        self.assertTrue(result["isComplete"])
+        self.assertEqual(result["missingFields"], [])
+        self.assertIsNone(result["nextQuestion"])
+        self.assertEqual(result["replyMode"], "complete")
+        self.assertIn("scope is complete", result["assistantReply"])
+        self.assertNotIn("What else", result["assistantReply"])
 
     def test_boolean_model_values_are_not_treated_as_requirements(self):
         result = _normalize_llm_result(

@@ -39,12 +39,15 @@ def health():
         "gemini": is_ai_provider_configured(),
         "figma": is_figma_provider_configured(),
     }
-    configured = all(checks.values())
+    # Gemini powers the service itself. Figma inspection is an optional
+    # capability and must not make every unrelated AI endpoint appear offline.
+    configured = checks["gemini"]
     payload = {
         "status": "ok" if configured else "degraded",
         "service": "nexus-ai-service",
         "aiProviderConfigured": configured,
         "checks": checks,
+        "optionalCapabilities": {"figma": checks["figma"]},
         "figmaLiveSmokeConfigured": is_figma_smoke_configured(),
     }
     return payload if configured else JSONResponse(status_code=503, content=payload)

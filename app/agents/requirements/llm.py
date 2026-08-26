@@ -68,6 +68,34 @@ FIELD_LABELS.update(
 
 _client: Any | None = None
 
+EXPLICIT_FIELD_LABELS = {
+    "business domain": "businessDomain",
+    "business": "businessDomain",
+    "main goal": "mainGoal",
+    "goal": "mainGoal",
+    "target users": "targetUsers",
+    "users": "targetUsers",
+    "core features": "coreFeatures",
+    "features": "coreFeatures",
+    "platforms": "platforms",
+    "platform": "platforms",
+    "solution type": "solutionType",
+    "product type": "solutionType",
+    "scope details": "scopeDetails",
+    "pages screens and main journey": "scopeDetails",
+    "pages and screens": "scopeDetails",
+    "integrations": "integrations",
+    "admin needs": "adminNeeds",
+    "admin dashboard": "adminNeeds",
+    "deliverables": "deliverables",
+    "constraints preferences": "constraintsPreferences",
+    "constraints and preferences": "constraintsPreferences",
+    "client background": "clientBackground",
+    "suggested team size": "suggestedTeamSize",
+    "experience level": "experienceLevel",
+    "minimum years": "experienceMinYears",
+}
+
 
 def extract_requirements_with_llm(state: RequirementsState) -> dict[str, Any]:
     latest_message = state.get("latestMessage", "")
@@ -92,9 +120,16 @@ def extract_requirements_with_llm(state: RequirementsState) -> dict[str, Any]:
     prompt = build_requirements_extraction_prompt(state)
     raw_text = _generate_json_text(prompt)
     parsed = _parse_json_object(raw_text)
-    return _normalize_platforms_for_message(
-        _normalize_llm_result(parsed), latest_message
-    )
+    normalized = _normalize_llm_result(parsed)
+    # Clients often paste a complete questionnaire in one message. Explicitly
+    # labelled values are high-confidence evidence and also provide a safe
+    # fallback if a long model response is truncated or omits one section.
+    labelled_fields = _extract_explicit_labeled_fields(latest_message)
+    normalized["extractedFields"] = {
+        **labelled_fields,
+        **normalized.get("extractedFields", {}),
+    }
+    return _normalize_platforms_for_message(normalized, latest_message)
 
 
 def _generate_json_text(prompt: str) -> str:
@@ -195,22 +230,37 @@ def _get_model_candidates() -> list[str]:
 
 
 def _build_generation_config() -> dict[str, Any]:
+    configured_max_tokens = int(
+        os.getenv("GEMINI_REQUIREMENTS_MAX_OUTPUT_TOKENS", "2048")
+    )
     config: dict[str, Any] = {
         "temperature": 0,
-        "max_output_tokens": int(
-            os.getenv("GEMINI_REQUIREMENTS_MAX_OUTPUT_TOKENS", "1024")
-        ),
+        # A complete one-message brief can contain every allowed field. Smaller
+        # limits produced truncated JSON, which looked like no progress and sent
+        # clients around the interview again.
+        "max_output_tokens": max(2048, configured_max_tokens),
     }
 
-    thinking_level = os.getenv("GEMINI_THINKING_LEVEL")
+    thinking_level = os.getenv(
+        "GEMINI_REQUIREMENTS_THINKING_LEVEL",
+        os.getenv("GEMINI_THINKING_LEVEL", ""),
+    )
     if thinking_level is not None and thinking_level.strip():
-        config["thinking_level"] = thinking_level.strip()
+        config["thinking_config"] = {
+            "thinking_level": thinking_level.strip(),
+            "include_thoughts": False,
+        }
 
     thinking_budget = os.getenv(
         "GEMINI_REQUIREMENTS_THINKING_BUDGET",
         os.getenv("GEMINI_THINKING_BUDGET", "0"),
     )
-    if thinking_budget is not None and thinking_budget.strip():
+    if (
+        "thinking_config" not in config
+        and thinking_budget is not None
+        and thinking_budget.strip()
+        and int(thinking_budget) > 0
+    ):
         config["thinking_config"] = {
             "thinking_budget": int(thinking_budget),
             "include_thoughts": False,
@@ -257,6 +307,37 @@ def _parse_json_object(raw_text: str) -> dict[str, Any]:
         return {}
 
     return parsed
+
+
+def _extract_explicit_labeled_fields(message: Any) -> dict[str, Any]:
+    """Extract questionnaire-style fields without inferring unlabeled scope."""
+    if not isinstance(message, str) or not message.strip():
+        return {}
+
+    aliases = sorted(EXPLICIT_FIELD_LABELS, key=len, reverse=True)
+    label_pattern = "|".join(re.escape(label) for label in aliases)
+    pattern = re.compile(
+        rf"(?ims)^\s*(?:[-*]\s*)?(?P<label>{label_pattern})\s*[:\-]\s*"
+        rf"(?P<value>.+?)(?=^\s*(?:[-*]\s*)?(?:{label_pattern})\s*[:\-]|\Z)"
+    )
+    matches = list(pattern.finditer(message))
+    # A single natural sentence such as "Goal: ..." is not necessarily a
+    # questionnaire. Require multiple labels before using this deterministic
+    # fallback; the model remains responsible for ordinary prose.
+    if len(matches) < 2:
+        return {}
+
+    fields: dict[str, Any] = {}
+    for match in matches:
+        normalized_label = " ".join(
+            re.sub(r"[^a-zA-Z0-9]+", " ", match.group("label")).lower().split()
+        )
+        field = EXPLICIT_FIELD_LABELS.get(normalized_label)
+        value = match.group("value").strip().strip("-•* \t\r\n")
+        if field and value:
+            fields[field] = value
+
+    return _filter_allowed_fields(fields)
 
 
 def _filter_allowed_fields(fields: dict[str, Any]) -> dict[str, Any]:

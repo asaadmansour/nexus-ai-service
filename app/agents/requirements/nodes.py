@@ -218,17 +218,15 @@ def choose_next_question_node(state: RequirementsState) -> dict[str, Any]:
     missing_fields = state.get("missingFields", [])
 
     if not missing_fields:
-        assistant_reply = state.get("assistantReply")
-        if not isinstance(assistant_reply, str) or not assistant_reply.strip():
-            assistant_reply = (
-                "Thanks—the first-release scope is now clear enough to review and price."
-            )
         return {
             "nextQuestion": None,
             "nextQuestionField": None,
             "pendingField": None,
-            "assistantReply": assistant_reply,
-            "replyMode": state.get("replyMode") or "complete",
+            "assistantReply": (
+                "Thanks—the first-release scope is complete. Review the brief, "
+                "then confirm it to generate your quote."
+            ),
+            "replyMode": "complete",
         }
 
     next_field = missing_fields[0]

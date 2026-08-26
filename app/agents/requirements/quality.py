@@ -66,7 +66,8 @@ def is_brief_scope_field_complete(field: str, value: Any) -> bool:
                 r"\b(?:sell|buy|book|manage|track|show|display|explain|describe|collect|inform|"
                 r"market|promote|reduce|automate|help|allow|enable|connect|order|"
                 r"reserve|schedule|learn|contact|generate|receive|share|find|"
-                r"compare|request|provide|present)\b",
+                r"compare|request|provide|present|grow|increase|improve|showcase|"
+                r"advertise|streamline|digitize|engage|support|serve)\b",
                 item,
                 re.IGNORECASE,
             )
