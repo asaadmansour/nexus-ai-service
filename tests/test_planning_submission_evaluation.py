@@ -110,7 +110,10 @@ class PlanningSubmissionEvaluationTests(unittest.TestCase):
 
         self.assertFalse(result.passed)
         self.assertEqual(result.recommendation, "changes_requested")
-        self.assertEqual(result.score, 69)
+        # One of two applicable requirements is met. The score is derived from
+        # criterion statuses, then capped when blockers exist; it must not reuse
+        # the model's contradictory 98/100 claim.
+        self.assertEqual(result.score, 50)
         self.assertEqual(result.checks[1].status, "missing")
         self.assertTrue(result.revisionItems)
 

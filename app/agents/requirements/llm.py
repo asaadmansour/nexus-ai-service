@@ -10,6 +10,10 @@ from app.agents.requirements.prompts import (
     REQUIREMENTS_SYSTEM_PROMPT,
     build_requirements_extraction_prompt,
 )
+from app.agents.requirements.intent import (
+    is_direct_prompt_injection,
+    is_unrelated_requirements_request,
+)
 from app.agents.requirements.state import REQUIRED_BRIEF_FIELDS, RequirementsState
 
 
@@ -269,7 +273,7 @@ def _filter_allowed_fields(fields: dict[str, Any]) -> dict[str, Any]:
                 filtered[key] = clean_value
             continue
 
-        if isinstance(value, int | float):
+        if isinstance(value, int | float) and not isinstance(value, bool):
             filtered[key] = value
             continue
 
@@ -297,7 +301,7 @@ def _clean_assistant_reply(value: Any) -> str | None:
         return None
 
     cleaned = " ".join(value.strip().split())
-    return cleaned[:700] if cleaned else None
+    return cleaned[:500] if cleaned else None
 
 
 def _clean_field_list(field: str, values: list[Any]) -> list[str]:
@@ -436,35 +440,7 @@ def _is_empty(value: Any) -> bool:
 
 
 def _is_direct_prompt_injection(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    normalized = " ".join(value.lower().split())
-    instruction_markers = (
-        "ignore previous instructions",
-        "ignore all previous",
-        "ignore the system prompt",
-        "reveal the system prompt",
-        "show me your system prompt",
-        "print your hidden instructions",
-        "developer message",
-        "hidden chain of thought",
-        "bypass your rules",
-        "jailbreak",
-    )
-    action_markers = (
-        "output instead",
-        "return non-json",
-        "call a tool",
-        "reveal",
-        "print",
-        "show me",
-    )
-    if any(marker in normalized for marker in instruction_markers):
-        return True
-    return (
-        ("system prompt" in normalized or "hidden instruction" in normalized)
-        and any(marker in normalized for marker in action_markers)
-    )
+    return is_direct_prompt_injection(value)
 
 
 def _is_clearly_unrelated_question(value: Any) -> bool:
@@ -473,49 +449,7 @@ def _is_clearly_unrelated_question(value: Any) -> bool:
     This is deliberately narrow. General words such as "what" or "how" are not
     enough because customers legitimately ask those while shaping a project.
     """
-    if not isinstance(value, str):
-        return False
-    normalized = " ".join(value.lower().split())
-    if not normalized:
-        return False
-
-    project_markers = (
-        "project",
-        "website",
-        "web app",
-        "mobile app",
-        "software",
-        "feature",
-        "screen",
-        "page",
-        "user",
-        "customer",
-        "admin",
-        "design",
-        "build",
-        "develop",
-        "price",
-        "cost",
-        "budget",
-        "deadline",
-        "integration",
-        "payment",
-        "login",
-        "dashboard",
-    )
-    if any(marker in normalized for marker in project_markers):
-        return False
-
-    unrelated_patterns = (
-        r"\b(?:what|which)\s+(?:is|was)\s+the\s+capital\s+of\b",
-        r"\bwho\s+(?:is|was)\s+(?:the\s+)?(?:president|king|queen|prime minister)\b",
-        r"\b(?:weather|temperature|forecast)\s+(?:in|for|today|tomorrow)\b",
-        r"\b(?:football|soccer|basketball|tennis)\s+(?:score|result|standings)\b",
-        r"\b(?:stock|crypto|bitcoin|ethereum)\s+price\b",
-        r"\b(?:tell|write)\s+(?:me\s+)?(?:a\s+)?(?:joke|poem|story|song)\b",
-        r"\b(?:recipe|cooking instructions)\s+for\b",
-    )
-    return any(re.search(pattern, normalized) for pattern in unrelated_patterns)
+    return is_unrelated_requirements_request(value)
 
 
 def _normalize_platforms_for_message(

@@ -12,6 +12,8 @@ class RequirementsState(TypedDict, total=False):
     # Values produced by the LangGraph nodes.
     knownFields: dict[str, Any]
     pendingField: str | None
+    messageIntent: str
+    replyMode: str
     useFastPath: bool
     fastPathUsed: bool
     fastPathReason: str | None

@@ -124,11 +124,17 @@ def _normalize_quote_response(
     quote.recommendedMinimum = _round_money(market_minimum)
     quote.amount = quote.recommendedMinimum
     quote.budgetGap = _round_money(max(quote.recommendedMinimum - budget_max, 0))
-    quote.currency = quote.currency or _currency(request.project)
+    requested_currency = _currency(request.project)
+    if quote.currency != requested_currency:
+        raise ProjectQuoteEstimationError(
+            f"Quote currency {quote.currency} does not match requested currency "
+            f"{requested_currency}."
+        )
     # Guard against a quote whose numbers are in a different currency than the
     # label says. Raising here drops through to the deterministic fallback rather
     # than showing a customer a price that is wrong by an exchange rate.
     _assert_rates_plausible(quote, quote.currency)
+    _assert_scope_envelope(quote, _scope_tier(request.brief or {}), request)
     quote.quoteStatus = "out_of_budget" if quote.budgetGap > 0 else "pending_customer"
     if not quote.rationale.strip():
         quote.rationale = "Estimated from the confirmed requirements and budget range."
@@ -146,10 +152,29 @@ def _normalize_quote_response(
 # treated as a failed generation and falls back to the deterministic estimate.
 # Override with QUOTE_RATE_BANDS, e.g. "USD:15-400,EGP:200-8000".
 _DEFAULT_RATE_BANDS = {
-    "USD": (15.0, 400.0),
-    "EUR": (15.0, 400.0),
-    "GBP": (15.0, 400.0),
-    "EGP": (200.0, 8000.0),
+    "USD": (5.0, 175.0),
+    "EUR": (5.0, 175.0),
+    "GBP": (5.0, 175.0),
+    "EGP": (150.0, 3000.0),
+}
+
+_SCOPE_PERSON_HOUR_ENVELOPES = {
+    "trivial": (6.0, 28.0),
+    "small": (24.0, 110.0),
+    "standard": (70.0, 320.0),
+    "complex": (180.0, 1100.0),
+}
+_TIER_HOURS = {
+    "trivial": {"reviewer": 2, "architect": 2, "uiux": 2, "implementation": 8},
+    "small": {"reviewer": 4, "architect": 4, "uiux": 6, "implementation": 40},
+    "standard": {"reviewer": 8, "architect": 10, "uiux": 12, "implementation": 100},
+    "complex": {"reviewer": 20, "architect": 24, "uiux": 32, "implementation": 320},
+}
+_DEFAULT_ROLE_RATES = {
+    "EGP": {"reviewer": 650.0, "architect": 550.0, "uiux": 450.0, "implementation": 400.0},
+    "USD": {"reviewer": 15.0, "architect": 14.0, "uiux": 10.0, "implementation": 8.0},
+    "EUR": {"reviewer": 15.0, "architect": 14.0, "uiux": 10.0, "implementation": 8.0},
+    "GBP": {"reviewer": 15.0, "architect": 14.0, "uiux": 10.0, "implementation": 8.0},
 }
 
 
@@ -181,13 +206,52 @@ def _assert_rates_plausible(quote: ProjectQuoteResponse, currency: str) -> None:
         rate = float(estimate.hourlyRate)
         if rate < low or rate > high:
             raise ProjectQuoteEstimationError(
-                f"{estimate.role} hourly rate {rate:.2f} is outside the plausible "
+                f"{estimate.roleKey} hourly rate {rate:.2f} is outside the plausible "
                 f"range for {currency} ({low:.0f}-{high:.0f}). The quote was most "
                 f"likely priced in a different currency."
             )
 
 
+def _assert_scope_envelope(
+    quote: ProjectQuoteResponse, tier: str, request: ProjectQuoteRequest
+) -> None:
+    required_roles = {
+        "principal_reviewer",
+        "architect",
+        "ui_ux",
+        "implementation",
+    }
+    actual_roles = {estimate.roleKey for estimate in quote.roleEstimates}
+    if not required_roles.issubset(actual_roles):
+        raise ProjectQuoteEstimationError(
+            "Quote is missing one or more mandatory delivery roles."
+        )
+    person_hours = sum(
+        estimate.people * estimate.hoursEach for estimate in quote.roleEstimates
+    )
+    minimum, maximum = _SCOPE_PERSON_HOUR_ENVELOPES[tier]
+    if person_hours < minimum or person_hours > maximum:
+        raise ProjectQuoteEstimationError(
+            f"Quote uses {person_hours:.1f} person-hours, outside the {tier} scope "
+            f"envelope ({minimum:.0f}-{maximum:.0f})."
+        )
+    reference_total = _reference_labor_total(request, tier) / 0.9
+    minimum_total = reference_total * 0.4
+    maximum_total = reference_total * 2.5
+    if quote.recommendedMinimum < minimum_total:
+        raise ProjectQuoteEstimationError(
+            f"Quote total {quote.recommendedMinimum:.2f} is below the {tier} "
+            f"fixed-price market sanity limit {minimum_total:.2f} {quote.currency}."
+        )
+    if quote.recommendedMinimum > maximum_total:
+        raise ProjectQuoteEstimationError(
+            f"Quote total {quote.recommendedMinimum:.2f} exceeds the {tier} "
+            f"fixed-price market sanity limit {maximum_total:.2f} {quote.currency}."
+        )
+
+
 def _build_prompt(request: ProjectQuoteRequest) -> str:
+    scope_tier = _scope_tier(request.brief or {})
     pricing_project = {
         key: value
         for key, value in request.project.items()
@@ -198,6 +262,8 @@ def _build_prompt(request: ProjectQuoteRequest) -> str:
             "project": pricing_project,
             "brief": request.brief or {},
             "currency": _currency(request.project),
+            "scopeTier": scope_tier,
+            "personHourEnvelope": _SCOPE_PERSON_HOUR_ENVELOPES[scope_tier],
         },
         indent=2,
         default=str,
@@ -244,6 +310,17 @@ Rules:
 - Include architecture and UI/UX planning effort because those stages are mandatory,
   but scale their effort to the actual complexity. A trivial single-screen project gets
   a minimal planning package, not enterprise architecture and prototype pricing.
+- Price as fixed-scope freelance work, not as salaried employment or agency retainers.
+  Prioritize comparable fixed-price listings and project catalogs from Khamsat,
+  Mostaql, Fiverr, and Upwork. Glassdoor, Wuzzuf, annual salaries, and generic agency
+  price articles are not valid evidence for the customer-facing project total.
+- Use these broad marketplace sanity anchors before currency conversion: a simple
+  landing/static page is commonly tens to a few hundred USD; a small marketing site
+  is commonly low hundreds to about one thousand USD; a scoped custom web app is
+  commonly about one to five thousand USD; complex multi-role platforms may exceed
+  that. Adjust for the confirmed work, not the client's budget.
+- Stay inside the supplied scopeTier personHourEnvelope. Do not add contingency work,
+  enterprise documentation, extra platforms, or speculative features to consume it.
 - Cite market signals briefly in `pricingSignals` and put source URLs/domains in
   `sources` when search grounding provides them.
 - Be conservative: do not underprice complex multi-platform projects.
@@ -341,21 +418,22 @@ def _fallback_quote(request: ProjectQuoteRequest, reason: str) -> Dict[str, Any]
     feature_count = _count_items(brief.get("coreFeatures"))
     platform_count = max(1, _count_items(brief.get("platforms")))
     deliverable_count = _count_items(brief.get("deliverables"))
-    requirement_profile = brief.get("requirementProfile") or {}
-    planning_complexity = (
-        requirement_profile.get("complexity")
-        if isinstance(requirement_profile, dict)
-        else None
-    )
-    if _is_minimal_website_scope(brief):
-        planning_complexity = "trivial"
+    scope_tier = _scope_tier(brief)
+    if scope_tier == "trivial":
         platform_count = 1
-    team_size = _to_number(brief.get("suggestedTeamSize")) or (
-        1.0 if planning_complexity == "trivial" else 2.0
-    )
+    suggested_team_size = _to_number(brief.get("suggestedTeamSize"))
+    default_workers = {"trivial": 1, "small": 1, "standard": 2, "complex": 3}[
+        scope_tier
+    ]
+    max_workers = {"trivial": 1, "small": 1, "standard": 3, "complex": 5}[
+        scope_tier
+    ]
+    team_size = min(max_workers, max(1, round(suggested_team_size or default_workers)))
     complexity_score = min(
         1.0,
-        (0.05 if planning_complexity == "trivial" else 0.2)
+        {"trivial": 0.05, "small": 0.16, "standard": 0.32, "complex": 0.62}[
+            scope_tier
+        ]
         + min(feature_count, 8) * 0.06
         + min(platform_count, 3) * 0.08
         + min(deliverable_count, 5) * 0.04
@@ -363,22 +441,14 @@ def _fallback_quote(request: ProjectQuoteRequest, reason: str) -> Dict[str, Any]
         + _deadline_pressure(request.project.get("deadline")),
     )
     complexity = "high" if complexity_score >= 0.72 else "medium" if complexity_score >= 0.45 else "low"
-    complexity_key = (
-        "trivial"
-        if planning_complexity == "trivial"
-        else "complex" if complexity == "high" else "standard"
-    )
-    hours = {
-        "trivial": {"reviewer": 2, "architect": 2, "uiux": 2, "implementation": 8},
-        "standard": {"reviewer": 12, "architect": 16, "uiux": 18, "implementation": 160},
-        "complex": {"reviewer": 28, "architect": 36, "uiux": 40, "implementation": 480},
-    }[complexity_key]
+    hours = _TIER_HOURS[scope_tier]
     workers = max(1, min(8, round(team_size)))
+    rates = _role_market_rates(_currency(request.project))
     role_estimates = [
-        _role_estimate("principal_reviewer", 1, hours["reviewer"], _market_rate("MARKET_RATE_PRINCIPAL_REVIEWER", 650)),
-        _role_estimate("architect", 1, hours["architect"], _market_rate("MARKET_RATE_ARCHITECT", 550)),
-        _role_estimate("ui_ux", 1, hours["uiux"], _market_rate("MARKET_RATE_UI_UX", 450)),
-        _role_estimate("implementation", workers, _ceil_div(hours["implementation"], workers), _market_rate("MARKET_RATE_DEVELOPER", 400)),
+        _role_estimate("principal_reviewer", 1, hours["reviewer"], rates["reviewer"]),
+        _role_estimate("architect", 1, hours["architect"], rates["architect"]),
+        _role_estimate("ui_ux", 1, hours["uiux"], rates["uiux"]),
+        _role_estimate("implementation", workers, _ceil_div(hours["implementation"], workers), rates["implementation"]),
     ]
     labor_total = sum(item.subtotal for item in role_estimates)
     recommended_minimum = _round_money(labor_total / 0.9)
@@ -397,7 +467,12 @@ def _fallback_quote(request: ProjectQuoteRequest, reason: str) -> Dict[str, Any]
         rationale="Estimated from role hours and market-rate assumptions before comparison with the customer budget.",
         assumptions=_default_assumptions() + [reason],
         pricingSignals=_fallback_pricing_signals(request),
-        sources=["Nexus deterministic project quote fallback"],
+        sources=[
+            "https://khamsat.com/programming/custom-website-development",
+            "https://mostaql.com/projects/development",
+            "https://www.fiverr.com/categories/programming-tech",
+            "https://www.upwork.com/services/",
+        ],
     )
     return quote.model_dump()
 
@@ -432,6 +507,89 @@ def _is_minimal_website_scope(brief: Dict[str, Any]) -> bool:
     return minimal_solution and not explicit_native_app and no_integrations and no_admin
 
 
+def _scope_tier(brief: Dict[str, Any]) -> str:
+    if _is_minimal_website_scope(brief):
+        return "trivial"
+
+    solution = _normalized_scope_text(brief.get("solutionType"))
+    platforms = _normalized_scope_text(brief.get("platforms"))
+    scope = _normalized_scope_text(brief.get("scopeDetails"))
+    integrations = _normalized_scope_text(brief.get("integrations"))
+    admin = _normalized_scope_text(brief.get("adminNeeds"))
+    features = _count_items(brief.get("coreFeatures"))
+    platform_count = max(1, _count_items(brief.get("platforms")))
+    page_count = _scope_count(scope)
+    native_app = bool(
+        re.search(
+            r"\b(?:mobile app|native app|ios|android|flutter|react native)\b",
+            f"{solution} {platforms}",
+        )
+    )
+    has_admin = not (
+        admin in {"none", "no", "not needed", "n/a"}
+        or bool(re.search(r"\bno admin(?: dashboard| area)?\b", admin))
+    )
+    integration_count = 0 if _explicit_none(integrations) else _count_items(integrations)
+
+    if (
+        platform_count >= 2
+        or (native_app and has_admin)
+        or features >= 9
+        or integration_count >= 4
+        or page_count >= 20
+    ):
+        return "complex"
+    if (
+        any(marker in solution for marker in ("marketing website", "multi page", "multi-page", "portfolio"))
+        and not native_app
+        and not has_admin
+        and integration_count <= 1
+        and (page_count == 0 or page_count <= 8)
+        and features <= 6
+    ):
+        return "small"
+    if (
+        "website" in solution
+        and "web app" not in solution
+        and not native_app
+        and not has_admin
+        and integration_count <= 1
+        and features <= 6
+        and (page_count == 0 or page_count <= 8)
+    ):
+        return "small"
+    return "standard"
+
+
+def _explicit_none(value: str) -> bool:
+    return value in {"", "none", "no", "not needed", "n/a"} or bool(
+        re.search(r"\bno integrations?\b", value)
+    )
+
+
+def _scope_count(value: str) -> int:
+    numeric = re.search(r"\b(\d+)\s+(?:pages?|screens?|sections?)\b", value)
+    if numeric:
+        return int(numeric.group(1))
+    words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+    }
+    written = re.search(
+        r"\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:pages?|screens?|sections?)\b",
+        value,
+    )
+    return words.get(written.group(1), 0) if written else 0
+
+
 def _normalized_scope_text(value: Any) -> str:
     if isinstance(value, list):
         value = " ".join(str(item) for item in value)
@@ -445,6 +603,8 @@ def _fallback_pricing_signals(request: ProjectQuoteRequest) -> List[str]:
     return [
         f"{_count_items(brief.get('coreFeatures')) or 'Several'} core feature area(s) in scope.",
         f"{max(1, _count_items(brief.get('platforms')))} platform target(s) included.",
+        f"Scope classified as {_scope_tier(brief)} using confirmed pages, workflows, platforms, integrations, and admin needs.",
+        "Fixed-price freelance marketplace benchmarks were used instead of salary data.",
         "Proportionate architecture and UI/UX planning included before implementation.",
     ]
 
@@ -486,7 +646,7 @@ def _count_items(value: Any) -> int:
     if isinstance(value, list):
         return len([item for item in value if str(item).strip()])
     if isinstance(value, str) and value.strip():
-        return len([item for item in re.split(r",|;|\n|\band\b", value) if item.strip()])
+        return len([item for item in re.split(r",|;|\n", value) if item.strip()])
     return 0
 
 
@@ -520,8 +680,32 @@ def _round_money(value: float) -> float:
     return round(float(value), 2)
 
 
-def _market_rate(name: str, fallback: float) -> float:
-    return _to_number(os.getenv(name)) or fallback
+def _role_market_rates(currency: str) -> Dict[str, float]:
+    code = currency.upper()
+    defaults = _DEFAULT_ROLE_RATES.get(code, _DEFAULT_ROLE_RATES["USD"])
+    env_names = {
+        "reviewer": "MARKET_RATE_PRINCIPAL_REVIEWER",
+        "architect": "MARKET_RATE_ARCHITECT",
+        "uiux": "MARKET_RATE_UI_UX",
+        "implementation": "MARKET_RATE_DEVELOPER",
+    }
+    rates: Dict[str, float] = {}
+    for role, name in env_names.items():
+        currency_specific = _to_number(os.getenv(f"{name}_{code}"))
+        legacy_egp = _to_number(os.getenv(name)) if code == "EGP" else None
+        rates[role] = currency_specific or legacy_egp or defaults[role]
+    return rates
+
+
+def _reference_labor_total(request: ProjectQuoteRequest, tier: str) -> float:
+    hours = _TIER_HOURS[tier]
+    rates = _role_market_rates(_currency(request.project))
+    return (
+        hours["reviewer"] * rates["reviewer"]
+        + hours["architect"] * rates["architect"]
+        + hours["uiux"] * rates["uiux"]
+        + hours["implementation"] * rates["implementation"]
+    )
 
 
 def _role_estimate(

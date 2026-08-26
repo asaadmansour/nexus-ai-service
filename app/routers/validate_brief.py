@@ -58,4 +58,6 @@ def validate_brief(request: ValidateBriefRequest):
         "fastPathUsed": final_state.get("fastPathUsed", False),
         "fastPathReason": final_state.get("fastPathReason"),
         "extractionSource": final_state.get("extractionSource", "llm"),
+        "messageIntent": final_state.get("messageIntent"),
+        "replyMode": final_state.get("replyMode"),
     }

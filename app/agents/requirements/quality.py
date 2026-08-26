@@ -171,7 +171,8 @@ def is_requirements_guidance_request(value: Any) -> bool:
         or QUESTION_PREFIX.search(normalized) is not None
         or re.search(
             r"\b(?:what do (?:you|u) suggest|recommend|suggest|help me "
-            r"(?:choose|decide)|what do you mean)\b",
+            r"(?:choose|decide)|what do you mean|i don'?t understand|"
+            r"not familiar with|can you explain|could you explain|please explain)\b",
             normalized,
             re.IGNORECASE,
         )
@@ -193,7 +194,7 @@ def _normalized_items(value: Any) -> list[str]:
         return []
     return [
         normalized
-        for item in re.split(r",|;|\n|\band\b", value, flags=re.IGNORECASE)
+        for item in re.split(r",|;|\n", value, flags=re.IGNORECASE)
         if (normalized := _normalize(item))
     ]
 

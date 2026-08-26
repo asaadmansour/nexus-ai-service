@@ -376,11 +376,13 @@ def validate_and_normalize_plan(
     tasks_by_key = {task.clientKey: task for task in plan.tasks}
     dependency_pairs = set()
     for dep in plan.dependencies:
-        if dep.taskClientKey not in all_task_keys:
+        task_exists = dep.taskClientKey in all_task_keys
+        prerequisite_exists = dep.dependsOnTaskClientKey in all_task_keys
+        if not task_exists:
             errors.append(
             f"Dependency references unknown task '{dep.taskClientKey}'"
         )
-        if dep.dependsOnTaskClientKey not in all_task_keys:
+        if not prerequisite_exists:
             errors.append(
             f"Dependency references unknown task '{dep.dependsOnTaskClientKey}'"
         )
@@ -390,6 +392,10 @@ def validate_and_normalize_plan(
             f"Duplicate dependency found for task '{dep.taskClientKey}'."
         )
         dependency_pairs.add(pair)
+        if not task_exists or not prerequisite_exists:
+            # Report the invalid reference without crashing while trying to
+            # validate its schedule or build the cycle graph.
+            continue
         if dep.dependencyType in {"blocks", "after"}:
             task = tasks_by_key[dep.taskClientKey]
             prerequisite = tasks_by_key[dep.dependsOnTaskClientKey]
@@ -403,7 +409,11 @@ def validate_and_normalize_plan(
     # Detect cycles
     graph = {key: [] for key in all_task_keys}
     for dep in plan.dependencies:
-        graph[dep.taskClientKey].append(dep.dependsOnTaskClientKey)
+        if (
+            dep.taskClientKey in all_task_keys
+            and dep.dependsOnTaskClientKey in all_task_keys
+        ):
+            graph[dep.taskClientKey].append(dep.dependsOnTaskClientKey)
 
     visited = set()
     rec_stack = set()

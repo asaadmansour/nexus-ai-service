@@ -2,10 +2,15 @@ import unittest
 from unittest.mock import patch
 
 from app.agents.project_quote_estimation import (
+    ProjectQuoteEstimationError,
     ProjectQuoteRequest,
+    ProjectQuoteResponse,
+    RoleEstimate,
     _build_prompt,
     _fallback_quote,
     _is_minimal_website_scope,
+    _scope_tier,
+    _normalize_quote_response,
     estimate_project_quote,
 )
 
@@ -95,6 +100,89 @@ class ProjectQuoteEstimationTests(unittest.TestCase):
                 }
             )
         )
+
+    def test_small_marketing_site_does_not_jump_to_standard_app_hours(self):
+        brief = {
+            "mainGoal": "Present services and collect enquiries",
+            "targetUsers": ["potential customers"],
+            "coreFeatures": ["service pages", "contact form", "testimonials"],
+            "platforms": ["website"],
+            "solutionType": "multi-page marketing website",
+            "scopeDetails": "five pages: home, services, about, testimonials, contact",
+            "integrations": "none",
+            "adminNeeds": "no admin dashboard",
+            "deliverables": ["working website", "source code", "live link"],
+        }
+        self.assertEqual(_scope_tier(brief), "small")
+        quote = _fallback_quote(
+            ProjectQuoteRequest(
+                project={"budgetMin": 500, "budgetMax": 100_000, "currency": "EGP"},
+                brief=brief,
+            ),
+            "fallback",
+        )
+        implementation = next(
+            row for row in quote["roleEstimates"] if row["roleKey"] == "implementation"
+        )
+        self.assertEqual(implementation["hoursEach"], 40)
+        self.assertLess(quote["amount"], 50_000)
+
+    def test_fallback_rates_are_expressed_in_the_project_currency(self):
+        request = self.request(10_000)
+        request.project["currency"] = "USD"
+        request.brief.update(
+            {
+                "solutionType": "single landing page",
+                "scopeDetails": "one page with one heading",
+                "integrations": "none",
+                "adminNeeds": "no admin dashboard",
+            }
+        )
+        quote = _fallback_quote(request, "fallback")
+
+        self.assertEqual(quote["currency"], "USD")
+        self.assertLess(quote["amount"], 1_000)
+        self.assertTrue(
+            all(row["hourlyRate"] < 100 for row in quote["roleEstimates"])
+        )
+
+    def test_ai_quote_with_the_wrong_currency_is_rejected(self):
+        role_estimates = [
+            RoleEstimate(
+                roleKey=role,
+                people=1,
+                hoursEach=hours,
+                hourlyRate=rate,
+                subtotal=hours * rate,
+            )
+            for role, hours, rate in (
+                ("principal_reviewer", 2, 15),
+                ("architect", 2, 14),
+                ("ui_ux", 2, 10),
+                ("implementation", 8, 8),
+            )
+        ]
+        quote = ProjectQuoteResponse(
+            amount=1,
+            recommendedMinimum=1,
+            roleEstimates=role_estimates,
+            currency="EGP",
+            complexity="low",
+            rationale="test",
+        )
+        request = self.request(10_000)
+        request.project["currency"] = "USD"
+        request.brief.update(
+            {
+                "solutionType": "single landing page",
+                "scopeDetails": "one page with one heading",
+                "integrations": "none",
+                "adminNeeds": "no admin dashboard",
+            }
+        )
+
+        with self.assertRaises(ProjectQuoteEstimationError):
+            _normalize_quote_response(quote, request, 10_000)
 
     @patch.dict(
         "os.environ",

@@ -1,6 +1,7 @@
 from typing import Any
 
 from app.agents.requirements.llm import extract_requirements_with_llm
+from app.agents.requirements.intent import classify_requirements_message
 from app.agents.requirements.quality import (
     USER_REQUIRED_BRIEF_FIELDS,
     get_brief_scope_gaps,
@@ -47,6 +48,99 @@ def prepare_brief_context_node(state: RequirementsState) -> dict[str, Any]:
     }
 
 
+def classify_message_node(state: RequirementsState) -> dict[str, Any]:
+    current_brief = state.get("currentBrief", {})
+    conversation_mode = (
+        current_brief.get("conversationMode")
+        if isinstance(current_brief, dict)
+        else None
+    )
+    intent = classify_requirements_message(
+        state.get("latestMessage", ""),
+        conversation_mode=conversation_mode,
+        pending_field=state.get("pendingField"),
+    )
+    return {"messageIntent": intent}
+
+
+def respond_without_llm_node(state: RequirementsState) -> dict[str, Any]:
+    intent = state.get("messageIntent")
+    pending_field = state.get("pendingField")
+    known_fields = state.get("knownFields", {})
+    missing_fields = get_brief_scope_gaps(
+        known_fields if isinstance(known_fields, dict) else {}
+    )
+    next_field = (
+        pending_field
+        if isinstance(pending_field, str) and pending_field in missing_fields
+        else (missing_fields[0] if missing_fields else None)
+    )
+    next_question = QUESTION_BY_FIELD.get(next_field, "") if next_field else ""
+
+    if intent == "security":
+        prefix = (
+            "I can help define your project, but I can’t change my role or reveal "
+            "private instructions."
+        )
+        reply_mode = "security_boundary"
+    elif intent == "out_of_scope":
+        prefix = (
+            "I can only help shape this project’s requirements, so I won’t answer "
+            "unrelated questions here."
+        )
+        reply_mode = "scope_boundary"
+    elif intent == "social":
+        prefix = "You’re welcome—let’s keep shaping the first version."
+        reply_mode = "social"
+    elif intent == "initial_greeting":
+        current_brief = state.get("currentBrief", {})
+        project_context = (
+            current_brief.get("projectContext", {})
+            if isinstance(current_brief, dict)
+            else {}
+        )
+        project_title = (
+            project_context.get("title")
+            if isinstance(project_context, dict)
+            else None
+        )
+        title_text = (
+            f' for “{str(project_title).strip()[:80]}”'
+            if project_title and str(project_title).strip()
+            else ""
+        )
+        prefix = (
+            "Hi! I’ll help turn your idea"
+            f"{title_text} into a clear, priceable first release."
+        )
+        reply_mode = "initial_greeting"
+    else:
+        guidance_field = _resolve_guidance_field(
+            state.get("latestMessage", ""), next_field
+        )
+        field = guidance_field or next_field
+        return {
+            "useFastPath": True,
+            "fastPathUsed": True,
+            "fastPathReason": "deterministic_requirements_guidance",
+            "extractionSource": "guidance",
+            "extractedFields": {},
+            "assistantReply": _build_guidance_reply(field) if field else None,
+            "replyMode": "guidance",
+        }
+
+    assistant_reply = " ".join(part for part in (prefix, next_question) if part)
+    return {
+        "useFastPath": True,
+        "fastPathUsed": True,
+        "fastPathReason": f"deterministic_{intent}",
+        "extractionSource": "scope_guard" if intent in {"security", "out_of_scope"} else "deterministic",
+        "extractedFields": {},
+        "assistantReply": assistant_reply,
+        "replyMode": reply_mode,
+    }
+
+
 def extract_requirements_node(state: RequirementsState) -> dict[str, Any]:
     llm_result = extract_requirements_with_llm(state)
     extracted_fields = llm_result.get("extractedFields", {})
@@ -77,6 +171,7 @@ def extract_requirements_node(state: RequirementsState) -> dict[str, Any]:
         "extractionSource": "llm",
         "extractedFields": extracted_fields,
         "assistantReply": assistant_reply,
+        "replyMode": "project_answer" if state.get("messageIntent") == "project_question" else "requirements_progress",
     }
 
 
@@ -123,16 +218,36 @@ def choose_next_question_node(state: RequirementsState) -> dict[str, Any]:
     missing_fields = state.get("missingFields", [])
 
     if not missing_fields:
-        return {"nextQuestion": None, "nextQuestionField": None, "pendingField": None}
+        assistant_reply = state.get("assistantReply")
+        if not isinstance(assistant_reply, str) or not assistant_reply.strip():
+            assistant_reply = (
+                "Thanks—the first-release scope is now clear enough to review and price."
+            )
+        return {
+            "nextQuestion": None,
+            "nextQuestionField": None,
+            "pendingField": None,
+            "assistantReply": assistant_reply,
+            "replyMode": state.get("replyMode") or "complete",
+        }
 
     next_field = missing_fields[0]
+    next_question = QUESTION_BY_FIELD.get(
+        next_field,
+        "Can you share more details about the project?",
+    )
+    assistant_reply = state.get("assistantReply")
+    reply_mode = state.get("replyMode")
+    if reply_mode == "project_answer" and isinstance(assistant_reply, str):
+        # The model answers the in-scope question; the graph owns progression.
+        assistant_reply = f"{assistant_reply.rstrip()} {next_question}"
+    elif not isinstance(assistant_reply, str) or not assistant_reply.strip():
+        assistant_reply = next_question
     return {
         "nextQuestionField": next_field,
         "pendingField": next_field,
-        "nextQuestion": QUESTION_BY_FIELD.get(
-            next_field,
-            "Can you share more details about the project?",
-        ),
+        "nextQuestion": next_question,
+        "assistantReply": assistant_reply,
     }
 
 

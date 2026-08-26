@@ -8,6 +8,8 @@ from app.agents.requirements.llm import (
     _normalize_platforms_for_message,
     extract_requirements_with_llm,
 )
+from app.agents.requirements.intent import classify_requirements_message
+from app.agents.requirements.graph import requirements_graph
 from app.agents.requirements.nodes import (
     check_missing_fields_node,
     extract_requirements_node,
@@ -36,6 +38,19 @@ class RequirementsSanitizationTests(unittest.TestCase):
                 "deliverables": ["live link", "documentation"],
             },
         )
+
+    def test_boolean_model_values_are_not_treated_as_requirements(self):
+        result = _normalize_llm_result(
+            {
+                "extractedFields": {
+                    "suggestedTeamSize": True,
+                    "experienceMinYears": False,
+                },
+                "assistantReply": None,
+            }
+        )
+
+        self.assertEqual(result["extractedFields"], {})
 
     def test_deliverable_names_are_kept_out_of_core_features(self):
         result = _normalize_llm_result(
@@ -261,6 +276,80 @@ class RequirementsSanitizationTests(unittest.TestCase):
                 "What pages should my mobile-friendly website include?"
             )
         )
+
+    def test_malformed_trivia_is_deterministically_out_of_scope(self):
+        self.assertEqual(
+            classify_requirements_message("what is capital Egypt"),
+            "out_of_scope",
+        )
+
+    def test_arbitrary_unrelated_request_is_blocked_without_topic_allowlist(self):
+        self.assertEqual(
+            classify_requirements_message("Explain photosynthesis to me"),
+            "out_of_scope",
+        )
+        self.assertEqual(
+            classify_requirements_message("Explain capitalism to me"),
+            "out_of_scope",
+        )
+
+    def test_generic_words_do_not_turn_unrelated_requests_into_project_questions(self):
+        self.assertEqual(
+            classify_requirements_message("Write a business email for me"),
+            "out_of_scope",
+        )
+        self.assertEqual(
+            classify_requirements_message(
+                "Explain photosynthesis for my website project"
+            ),
+            "out_of_scope",
+        )
+
+    def test_pending_concept_questions_stay_helpful_and_in_scope(self):
+        self.assertEqual(
+            classify_requirements_message(
+                "What is an API?", pending_field="integrations"
+            ),
+            "project_question",
+        )
+        self.assertEqual(
+            classify_requirements_message(
+                "How much will this cost?", pending_field="scopeDetails"
+            ),
+            "project_question",
+        )
+        self.assertEqual(
+            classify_requirements_message(
+                "I don't understand integrations", pending_field="integrations"
+            ),
+            "guidance",
+        )
+
+    @patch("app.agents.requirements.nodes.extract_requirements_with_llm")
+    def test_scope_boundary_skips_model_and_keeps_pending_question(self, mocked_extract):
+        result = requirements_graph.invoke(
+            {
+                "latestMessage": "what is capital Egypt",
+                "currentBrief": {
+                    "pendingField": "integrations",
+                    "knownFields": {
+                        "mainGoal": "Sell handmade products online",
+                        "targetUsers": ["customers"],
+                        "coreFeatures": ["Browse products"],
+                        "platforms": ["website"],
+                        "solutionType": "web app",
+                        "scopeDetails": "five screens from catalog to checkout",
+                        "adminNeeds": "manage products and orders",
+                        "deliverables": ["working web app", "source code"],
+                    },
+                },
+            }
+        )
+
+        mocked_extract.assert_not_called()
+        self.assertEqual(result["messageIntent"], "out_of_scope")
+        self.assertEqual(result["nextQuestionField"], "integrations")
+        self.assertNotIn("Cairo", result["assistantReply"])
 
 
 if __name__ == "__main__":
