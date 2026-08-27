@@ -1,5 +1,4 @@
 import unittest
-from unittest.mock import patch
 
 from app.agents.project_quote_estimation import (
     ProjectQuoteEstimationError,
@@ -32,16 +31,6 @@ class ProjectQuoteEstimationTests(unittest.TestCase):
             },
         )
 
-    @patch.dict(
-        "os.environ",
-        {
-            "MARKET_RATE_PRINCIPAL_REVIEWER": "650",
-            "MARKET_RATE_ARCHITECT": "550",
-            "MARKET_RATE_UI_UX": "450",
-            "MARKET_RATE_DEVELOPER": "400",
-        },
-        clear=False,
-    )
     def test_market_cost_is_not_clamped_to_an_insufficient_customer_budget(self):
         quote = _fallback_quote(self.request(1000), "fallback")
 
@@ -124,8 +113,44 @@ class ProjectQuoteEstimationTests(unittest.TestCase):
         implementation = next(
             row for row in quote["roleEstimates"] if row["roleKey"] == "implementation"
         )
-        self.assertEqual(implementation["hoursEach"], 40)
+        self.assertEqual(implementation["hoursEach"], 32)
         self.assertLess(quote["amount"], 50_000)
+
+    def test_fixed_package_changes_with_confirmed_scope(self):
+        landing_request = self.request(500_000)
+        landing_request.brief.update(
+            {
+                "solutionType": "single landing page",
+                "scopeDetails": "one page with five static sections",
+                "integrations": "none",
+                "adminNeeds": "no admin dashboard",
+            }
+        )
+        landing = _fallback_quote(landing_request, "fallback")
+        application_request = ProjectQuoteRequest(
+            project={"budgetMin": 500, "budgetMax": 500_000, "currency": "EGP"},
+            brief={
+                "mainGoal": "Run customer orders",
+                "targetUsers": ["customers", "staff"],
+                "coreFeatures": [
+                    "accounts",
+                    "catalog",
+                    "checkout",
+                    "orders",
+                    "reporting",
+                    "notifications",
+                ],
+                "platforms": ["web app"],
+                "solutionType": "custom web app",
+                "scopeDetails": "twelve screens for customers and staff",
+                "integrations": ["Stripe", "email"],
+                "adminNeeds": "admin dashboard for orders and users",
+                "deliverables": ["working application", "source code"],
+            },
+        )
+        application = _fallback_quote(application_request, "fallback")
+
+        self.assertGreater(application["amount"], landing["amount"] * 3)
 
     def test_fallback_rates_are_expressed_in_the_project_currency(self):
         request = self.request(10_000)
@@ -184,16 +209,6 @@ class ProjectQuoteEstimationTests(unittest.TestCase):
         with self.assertRaises(ProjectQuoteEstimationError):
             _normalize_quote_response(quote, request, 10_000)
 
-    @patch.dict(
-        "os.environ",
-        {
-            "MARKET_RATE_PRINCIPAL_REVIEWER": "650",
-            "MARKET_RATE_ARCHITECT": "550",
-            "MARKET_RATE_UI_UX": "450",
-            "MARKET_RATE_DEVELOPER": "400",
-        },
-        clear=False,
-    )
     def test_customer_budget_minimum_does_not_inflate_the_quote(self):
         request = ProjectQuoteRequest(
             project={"budgetMin": 275_000, "budgetMax": 300_000, "currency": "EGP"},

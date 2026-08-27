@@ -335,6 +335,63 @@ class SubmissionEvaluationTests(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertFalse(result["requiresHumanReview"])
 
+    def test_incomplete_inspection_routes_to_human_without_revision(self):
+        request = {
+            "task": {"acceptanceCriteria": ["Feature works"]},
+            "submission": {
+                "submissionType": "pull_request",
+                "inspection": {
+                    "complete": False,
+                    "sourceInspected": True,
+                    "snapshotVerified": True,
+                    "verificationComplete": True,
+                    "commitSha": "a" * 40,
+                    "diffTruncated": True,
+                    "changedFilesTruncated": False,
+                    "coverage": {"changedFileCoverage": 0.5},
+                    "verification": {"coverage": {"test": True}, "results": []},
+                    "githubChecks": {"checkRuns": []},
+                    "pullRequest": {
+                        "number": 4,
+                        "state": "open",
+                        "draft": False,
+                        "headSha": "a" * 40,
+                    },
+                },
+            },
+        }
+        criteria = _required_rubric_criteria(request)
+        response = SubmissionEvaluationResponse(
+            passed=False,
+            score=91,
+            revisionRequested=True,
+            revisionNotes="Source coverage was incomplete.",
+            requiresHumanReview=True,
+            rubric=[
+                RubricItem(
+                    criterion=criterion,
+                    status="met",
+                    met=True,
+                    evidence="The available evidence supports this row.",
+                )
+                for criterion in criteria
+            ],
+        )
+
+        result = _normalize(response, request)
+
+        visibility = next(
+            item
+            for item in result["rubric"]
+            if item["key"] == "verification_observed_1"
+        )
+        self.assertEqual(visibility["status"], "unverified")
+        self.assertFalse(visibility["met"])
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["score"], 91)
+        self.assertTrue(result["requiresHumanReview"])
+        self.assertFalse(result["revisionRequested"])
+
     def test_failed_verification_overrides_model_pass_claim(self):
         request = {
             "task": {"acceptanceCriteria": ["Feature works"]},

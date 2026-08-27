@@ -112,51 +112,24 @@ def _normalize_quote_response(
     request: ProjectQuoteRequest,
     budget_max: float,
 ) -> ProjectQuoteResponse:
-    role_total = sum(
-        estimate.people * estimate.hoursEach * estimate.hourlyRate
-        for estimate in quote.roleEstimates
-    )
-    for estimate in quote.roleEstimates:
-        estimate.subtotal = _round_money(
-            estimate.people * estimate.hoursEach * estimate.hourlyRate
-        )
-    market_minimum = role_total / 0.9
-    quote.recommendedMinimum = _round_money(market_minimum)
-    quote.amount = quote.recommendedMinimum
-    quote.budgetGap = _round_money(max(quote.recommendedMinimum - budget_max, 0))
     requested_currency = _currency(request.project)
     if quote.currency != requested_currency:
         raise ProjectQuoteEstimationError(
             f"Quote currency {quote.currency} does not match requested currency "
             f"{requested_currency}."
         )
-    # Guard against a quote whose numbers are in a different currency than the
-    # label says. Raising here drops through to the deterministic fallback rather
-    # than showing a customer a price that is wrong by an exchange rate.
-    _assert_rates_plausible(quote, quote.currency)
-    _assert_scope_envelope(quote, _scope_tier(request.brief or {}), request)
-    quote.quoteStatus = "out_of_budget" if quote.budgetGap > 0 else "pending_customer"
-    if not quote.rationale.strip():
-        quote.rationale = "Estimated from the confirmed requirements and budget range."
-    if not quote.assumptions:
-        quote.assumptions = _default_assumptions()
-    if not quote.pricingSignals:
-        quote.pricingSignals = _fallback_pricing_signals(request)
-    return quote
+    # The LLM contributes market evidence and explanation only. Customer money
+    # comes from the deterministic fixed-package calculator, which prevents
+    # salary/agency hourly-rate anchoring and makes the same confirmed scope
+    # stable across model calls.
+    fixed = ProjectQuoteResponse(**_fallback_quote(request, "Fixed marketplace package pricing."))
+    fixed.confidence = quote.confidence
+    fixed.rationale = quote.rationale.strip() or fixed.rationale
+    fixed.assumptions = quote.assumptions or fixed.assumptions
+    fixed.pricingSignals = quote.pricingSignals or fixed.pricingSignals
+    fixed.sources = quote.sources or fixed.sources
+    return fixed
 
-
-# Plausible hourly rates per currency, used to catch a quote priced in the wrong
-# currency. A quote once returned rates ~18.6x too high because the model
-# converted USD to EGP but the platform labelled the result USD, producing a
-# 275,555 USD quote for a 15,000 USD project. Anything outside these bands is
-# treated as a failed generation and falls back to the deterministic estimate.
-# Override with QUOTE_RATE_BANDS, e.g. "USD:15-400,EGP:200-8000".
-_DEFAULT_RATE_BANDS = {
-    "USD": (5.0, 175.0),
-    "EUR": (5.0, 175.0),
-    "GBP": (5.0, 175.0),
-    "EGP": (150.0, 3000.0),
-}
 
 _SCOPE_PERSON_HOUR_ENVELOPES = {
     "trivial": (6.0, 28.0),
@@ -165,91 +138,18 @@ _SCOPE_PERSON_HOUR_ENVELOPES = {
     "complex": (180.0, 1100.0),
 }
 _TIER_HOURS = {
-    "trivial": {"reviewer": 2, "architect": 2, "uiux": 2, "implementation": 8},
-    "small": {"reviewer": 4, "architect": 4, "uiux": 6, "implementation": 40},
-    "standard": {"reviewer": 8, "architect": 10, "uiux": 12, "implementation": 100},
-    "complex": {"reviewer": 20, "architect": 24, "uiux": 32, "implementation": 320},
+    "trivial": {"reviewer": 1, "architect": 1, "uiux": 2, "implementation": 8},
+    "small": {"reviewer": 2, "architect": 3, "uiux": 6, "implementation": 32},
+    "standard": {"reviewer": 6, "architect": 10, "uiux": 12, "implementation": 96},
+    "complex": {"reviewer": 14, "architect": 24, "uiux": 28, "implementation": 260},
 }
-_DEFAULT_ROLE_RATES = {
-    "EGP": {"reviewer": 650.0, "architect": 550.0, "uiux": 450.0, "implementation": 400.0},
-    "USD": {"reviewer": 15.0, "architect": 14.0, "uiux": 10.0, "implementation": 8.0},
-    "EUR": {"reviewer": 15.0, "architect": 14.0, "uiux": 10.0, "implementation": 8.0},
-    "GBP": {"reviewer": 15.0, "architect": 14.0, "uiux": 10.0, "implementation": 8.0},
+_TIER_BASE_USD = {"trivial": 85.0, "small": 240.0, "standard": 650.0, "complex": 1600.0}
+_TIER_ROLE_SHARES = {
+    "trivial": {"reviewer": 0.12, "architect": 0.10, "uiux": 0.13, "implementation": 0.55},
+    "small": {"reviewer": 0.10, "architect": 0.12, "uiux": 0.18, "implementation": 0.50},
+    "standard": {"reviewer": 0.10, "architect": 0.15, "uiux": 0.15, "implementation": 0.50},
+    "complex": {"reviewer": 0.12, "architect": 0.18, "uiux": 0.16, "implementation": 0.44},
 }
-
-
-def _rate_bands() -> Dict[str, tuple]:
-    raw = os.getenv("QUOTE_RATE_BANDS", "").strip()
-    if not raw:
-        return dict(_DEFAULT_RATE_BANDS)
-    bands = dict(_DEFAULT_RATE_BANDS)
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if not entry or ":" not in entry:
-            continue
-        code, _, span = entry.partition(":")
-        low, _, high = span.partition("-")
-        try:
-            bands[code.strip().upper()] = (float(low), float(high))
-        except ValueError:
-            continue
-    return bands
-
-
-def _assert_rates_plausible(quote: ProjectQuoteResponse, currency: str) -> None:
-    """Rejects a quote whose hourly rates cannot be in the stated currency."""
-    band = _rate_bands().get(currency.upper())
-    if not band:
-        return
-    low, high = band
-    for estimate in quote.roleEstimates:
-        rate = float(estimate.hourlyRate)
-        if rate < low or rate > high:
-            raise ProjectQuoteEstimationError(
-                f"{estimate.roleKey} hourly rate {rate:.2f} is outside the plausible "
-                f"range for {currency} ({low:.0f}-{high:.0f}). The quote was most "
-                f"likely priced in a different currency."
-            )
-
-
-def _assert_scope_envelope(
-    quote: ProjectQuoteResponse, tier: str, request: ProjectQuoteRequest
-) -> None:
-    required_roles = {
-        "principal_reviewer",
-        "architect",
-        "ui_ux",
-        "implementation",
-    }
-    actual_roles = {estimate.roleKey for estimate in quote.roleEstimates}
-    if not required_roles.issubset(actual_roles):
-        raise ProjectQuoteEstimationError(
-            "Quote is missing one or more mandatory delivery roles."
-        )
-    person_hours = sum(
-        estimate.people * estimate.hoursEach for estimate in quote.roleEstimates
-    )
-    minimum, maximum = _SCOPE_PERSON_HOUR_ENVELOPES[tier]
-    if person_hours < minimum or person_hours > maximum:
-        raise ProjectQuoteEstimationError(
-            f"Quote uses {person_hours:.1f} person-hours, outside the {tier} scope "
-            f"envelope ({minimum:.0f}-{maximum:.0f})."
-        )
-    reference_total = _reference_labor_total(request, tier) / 0.9
-    minimum_total = reference_total * 0.4
-    maximum_total = reference_total * 2.5
-    if quote.recommendedMinimum < minimum_total:
-        raise ProjectQuoteEstimationError(
-            f"Quote total {quote.recommendedMinimum:.2f} is below the {tier} "
-            f"fixed-price market sanity limit {minimum_total:.2f} {quote.currency}."
-        )
-    if quote.recommendedMinimum > maximum_total:
-        raise ProjectQuoteEstimationError(
-            f"Quote total {quote.recommendedMinimum:.2f} exceeds the {tier} "
-            f"fixed-price market sanity limit {maximum_total:.2f} {quote.currency}."
-        )
-
-
 def _build_prompt(request: ProjectQuoteRequest) -> str:
     scope_tier = _scope_tier(request.brief or {})
     pricing_project = {
@@ -294,16 +194,18 @@ Input:
 
 Rules:
 - Return JSON only. No markdown. No extra text.
-- Estimate realistic role hours, people, and hourly market rates first. Do not
-  force the estimate inside the customer's budget.
+- Estimate a realistic fixed-scope freelance package first. Do not derive the
+  customer total by multiplying rank, hours, or employment hourly rates, and do
+  not force the estimate inside the customer's budget.
 - `recommendedMinimum` is the market-based total including a 10% Nexus fee.
 - `amount` equals recommendedMinimum. The customer's budget is intentionally absent
   from the pricing evidence so it cannot anchor the estimate. Return
   quoteStatus "pending_customer" and budgetGap 0; the platform compares the
   independently calculated amount with the customer's budget afterward.
 - roleEstimates must cover principal_reviewer, architect, ui_ux, and implementation.
-  The implementation row may contain multiple people. Its subtotal is
-  people × hoursEach × hourlyRate.
+  The implementation row may contain multiple people. Role rows divide the
+  fixed package internally; hourlyRate is an effective compatibility value,
+  not the customer pricing formula.
 - The amount is a customer-facing final estimate, not an hourly rate.
 - Every rate and total is in {quote_currency}. State {quote_currency} explicitly
   in `rationale` and `assumptions` so the figures cannot be misread.
@@ -315,9 +217,9 @@ Rules:
   Mostaql, Fiverr, and Upwork. Glassdoor, Wuzzuf, annual salaries, and generic agency
   price articles are not valid evidence for the customer-facing project total.
 - Use these broad marketplace sanity anchors before currency conversion: a simple
-  landing/static page is commonly tens to a few hundred USD; a small marketing site
-  is commonly low hundreds to about one thousand USD; a scoped custom web app is
-  commonly about one to five thousand USD; complex multi-role platforms may exceed
+  landing/static page is commonly about 50-200 USD; a small marketing site is
+  commonly about 150-700 USD; a scoped custom web app is commonly about 500-2,500
+  USD; complex multi-role platforms may exceed
   that. Adjust for the confirmed work, not the client's budget.
 - Stay inside the supplied scopeTier personHourEnvelope. Do not add contingency work,
   enterprise documentation, extra platforms, or speculative features to consume it.
@@ -443,15 +345,16 @@ def _fallback_quote(request: ProjectQuoteRequest, reason: str) -> Dict[str, Any]
     complexity = "high" if complexity_score >= 0.72 else "medium" if complexity_score >= 0.45 else "low"
     hours = _TIER_HOURS[scope_tier]
     workers = max(1, min(8, round(team_size)))
-    rates = _role_market_rates(_currency(request.project))
+    currency = _currency(request.project)
+    package_total = _fixed_package_total(request, scope_tier)
+    shares = _TIER_ROLE_SHARES[scope_tier]
     role_estimates = [
-        _role_estimate("principal_reviewer", 1, hours["reviewer"], rates["reviewer"]),
-        _role_estimate("architect", 1, hours["architect"], rates["architect"]),
-        _role_estimate("ui_ux", 1, hours["uiux"], rates["uiux"]),
-        _role_estimate("implementation", workers, _ceil_div(hours["implementation"], workers), rates["implementation"]),
+        _fixed_role_estimate("principal_reviewer", 1, hours["reviewer"], package_total * shares["reviewer"]),
+        _fixed_role_estimate("architect", 1, hours["architect"], package_total * shares["architect"]),
+        _fixed_role_estimate("ui_ux", 1, hours["uiux"], package_total * shares["uiux"]),
+        _fixed_role_estimate("implementation", workers, _ceil_div(hours["implementation"], workers), package_total * shares["implementation"]),
     ]
-    labor_total = sum(item.subtotal for item in role_estimates)
-    recommended_minimum = _round_money(labor_total / 0.9)
+    recommended_minimum = package_total
     amount = recommended_minimum
     budget_gap = _round_money(max(recommended_minimum - budget_max, 0))
 
@@ -460,11 +363,11 @@ def _fallback_quote(request: ProjectQuoteRequest, reason: str) -> Dict[str, Any]
         recommendedMinimum=recommended_minimum,
         budgetGap=budget_gap,
         roleEstimates=role_estimates,
-        currency=_currency(request.project),
+        currency=currency,
         quoteStatus="out_of_budget" if budget_gap > 0 else "pending_customer",
         confidence=0.55,
         complexity=complexity,
-        rationale="Estimated from role hours and market-rate assumptions before comparison with the customer budget.",
+        rationale="Fixed-scope freelance package estimated from the confirmed product scope; effort assumptions only divide the package among delivery roles.",
         assumptions=_default_assumptions() + [reason],
         pricingSignals=_fallback_pricing_signals(request),
         sources=[
@@ -612,7 +515,8 @@ def _fallback_pricing_signals(request: ProjectQuoteRequest) -> List[str]:
 def _default_assumptions() -> List[str]:
     return [
         "The first release follows the confirmed brief without major scope expansion.",
-        "The final escrow amount funds planning and implementation for the agreed scope.",
+        "The final escrow amount funds planning and implementation for the agreed fixed scope.",
+        "The delivery team accepts the project before the customer can fund escrow.",
         "Any major change after payment should be handled as a revision or change request.",
     ]
 
@@ -629,6 +533,61 @@ def _budget_range(project: Dict[str, Any]) -> tuple[float, float]:
 def _currency(project: Dict[str, Any]) -> str:
     raw = str(project.get("currency") or "EGP").strip().upper()
     return raw[:3] if raw else "EGP"
+
+
+def _currency_per_usd(currency: str) -> float:
+    if currency == "USD":
+        return 1.0
+    configured: Dict[str, float] = {}
+    for entry in os.getenv("CURRENCY_RATES_PER_USD", "").split(","):
+        code, separator, raw_rate = entry.partition(":")
+        if not separator:
+            continue
+        try:
+            rate = float(raw_rate)
+        except ValueError:
+            continue
+        if code.strip() and rate > 0:
+            configured[code.strip().upper()] = rate
+    return configured.get(currency, {"EGP": 48.5, "EUR": 0.92, "GBP": 0.79}.get(currency, 1.0))
+
+
+def _fixed_package_total(request: ProjectQuoteRequest, tier: str) -> float:
+    brief = request.brief or {}
+    feature_count = _count_items(brief.get("coreFeatures"))
+    platform_count = max(1, _count_items(brief.get("platforms")))
+    page_count = _scope_count(_normalized_scope_text(brief.get("scopeDetails")))
+    integrations = _normalized_scope_text(brief.get("integrations"))
+    integration_count = 0 if _explicit_none(integrations) else _count_items(brief.get("integrations"))
+    scope_text = " ".join(
+        _normalized_scope_text(brief.get(field))
+        for field in ("solutionType", "platforms", "scopeDetails", "adminNeeds")
+    )
+    native_app = bool(
+        re.search(r"\b(?:mobile app|native app|ios|android|flutter|react native)\b", scope_text)
+    )
+    admin = _normalized_scope_text(brief.get("adminNeeds"))
+    has_admin = not (
+        admin in {"", "none", "no", "not needed", "n/a"}
+        or bool(re.search(r"\bno admin(?: dashboard| area)?\b", admin))
+    )
+    variable = (
+        max(feature_count - 1, 0)
+        * {"trivial": 4, "small": 10, "standard": 28, "complex": 55}[tier]
+        + max(page_count - (1 if tier == "trivial" else 3), 0)
+        * {"trivial": 3, "small": 12, "standard": 24, "complex": 38}[tier]
+        + integration_count
+        * {"trivial": 0, "small": 25, "standard": 65, "complex": 110}[tier]
+        + ({"trivial": 0, "small": 50, "standard": 130, "complex": 220}[tier] if has_admin else 0)
+        + ((350 if tier == "complex" else 190) if native_app else 0)
+        + max(platform_count - 1, 0) * (220 if tier == "complex" else 90)
+    )
+    deadline_multiplier = 1 + min(_deadline_pressure(request.project.get("deadline")), 0.12)
+    return _round_money(
+        (_TIER_BASE_USD[tier] + variable)
+        * deadline_multiplier
+        * _currency_per_usd(_currency(request.project))
+    )
 
 
 def _to_number(value: Any) -> float | None:
@@ -680,46 +639,20 @@ def _round_money(value: float) -> float:
     return round(float(value), 2)
 
 
-def _role_market_rates(currency: str) -> Dict[str, float]:
-    code = currency.upper()
-    defaults = _DEFAULT_ROLE_RATES.get(code, _DEFAULT_ROLE_RATES["USD"])
-    env_names = {
-        "reviewer": "MARKET_RATE_PRINCIPAL_REVIEWER",
-        "architect": "MARKET_RATE_ARCHITECT",
-        "uiux": "MARKET_RATE_UI_UX",
-        "implementation": "MARKET_RATE_DEVELOPER",
-    }
-    rates: Dict[str, float] = {}
-    for role, name in env_names.items():
-        currency_specific = _to_number(os.getenv(f"{name}_{code}"))
-        legacy_egp = _to_number(os.getenv(name)) if code == "EGP" else None
-        rates[role] = currency_specific or legacy_egp or defaults[role]
-    return rates
-
-
-def _reference_labor_total(request: ProjectQuoteRequest, tier: str) -> float:
-    hours = _TIER_HOURS[tier]
-    rates = _role_market_rates(_currency(request.project))
-    return (
-        hours["reviewer"] * rates["reviewer"]
-        + hours["architect"] * rates["architect"]
-        + hours["uiux"] * rates["uiux"]
-        + hours["implementation"] * rates["implementation"]
-    )
-
-
-def _role_estimate(
+def _fixed_role_estimate(
     role_key: str,
     people: int,
     hours_each: float,
-    hourly_rate: float,
+    package_amount: float,
 ) -> RoleEstimate:
+    subtotal = _round_money(package_amount)
+    effective_rate = _round_money(subtotal / (people * hours_each))
     return RoleEstimate(
         roleKey=role_key,
         people=people,
         hoursEach=hours_each,
-        hourlyRate=hourly_rate,
-        subtotal=_round_money(people * hours_each * hourly_rate),
+        hourlyRate=effective_rate,
+        subtotal=subtotal,
     )
 
 
