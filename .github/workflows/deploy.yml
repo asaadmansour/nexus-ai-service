@@ -49,7 +49,10 @@ jobs:
             export SERVICE_TAG="$GITHUB_SHA"
             docker compose pull ai-service
             docker compose up -d --no-deps ai-service
-            # Drop images no longer referenced by a container so the disk
-            # does not fill up with one image per deploy.
-            docker image prune -af
+            expected_image="$ECR_REGISTRY/nexus-ai-service:$GITHUB_SHA"
+            actual_image="$(docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q ai-service)")"
+            test "$actual_image" = "$expected_image"
+            # Do not remove tagged images pulled by concurrent frontend/backend
+            # deploys before their containers have been recreated.
+            docker image prune -f
             docker compose ps
