@@ -46,4 +46,7 @@ jobs:
             echo "SERVICE_TAG=$GITHUB_SHA" >> .env
             docker compose pull ai-service
             docker compose up -d --no-deps ai-service
+            # Drop images no longer referenced by a container so the disk
+            # does not fill up with one image per deploy.
+            docker image prune -af
             docker compose ps
