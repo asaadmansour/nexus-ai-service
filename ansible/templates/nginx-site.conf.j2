@@ -1,0 +1,65 @@
+# Managed by Ansible. Reverse proxy for the compose stack (replaces the Kubernetes ingress).
+{% if tls_enabled %}
+server {
+    listen 80;
+    server_name {{ domain }};
+
+    # Keep the ACME path on HTTP so renewals succeed
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name {{ domain }};
+
+    ssl_certificate     /etc/letsencrypt/live/{{ domain }}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{ domain }}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+{% else %}
+server {
+    listen 80;
+    server_name {{ domain }};
+
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+{% endif %}
+
+    # CV and brief-document uploads are well over nginx's 1m default
+    client_max_body_size 25m;
+
+    # /api is served by the backend under the same origin, so the browser sends
+    # cookies normally and no CORS pre-flight is involved.
+    location /api/ {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        # Tells the app the original request was HTTPS, so Secure cookies and
+        # generated links are correct behind the proxy.
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        "upgrade";
+
+        # AI evaluation calls are long-running; don't cut them off at nginx's 60s default
+        proxy_connect_timeout 60s;
+        proxy_send_timeout    600s;
+        proxy_read_timeout    600s;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        "upgrade";
+    }
+}

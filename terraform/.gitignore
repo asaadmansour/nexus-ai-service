@@ -4,10 +4,4 @@
 .terraform/
 .terraform.lock.hcl
 *.tfvars
-*.tfvars.json
 crash.log
-crash.*.log
-
-# Stray local artifacts
-awscliv2.zip
-aws/

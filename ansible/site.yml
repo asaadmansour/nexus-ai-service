@@ -1,0 +1,200 @@
+---
+# Provisions the single application host: Docker, AWS CLI v2, nginx (TLS termination
+# + reverse proxy), and the compose stack. Safe to re-run; every task is idempotent.
+- name: Set up the Nexus AI application host
+  hosts: app
+  become: true
+
+  vars:
+    domain: nexus-ai-freelance.duckdns.org
+    letsencrypt_email: mohamed.kholy2011@gmail.com
+    app_dir: /opt/nexus-ai
+    aws_region: us-east-1
+
+  tasks:
+    - name: Install base packages
+      apt:
+        name: [ca-certificates, curl, gnupg, unzip, nginx, python3-certbot-nginx, certbot]
+        update_cache: true
+
+    # ---- Docker (official repo; the distro package lags and lacks the compose plugin) ----
+    - name: Add Docker apt key
+      shell: |
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
+          gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Add Docker apt repo
+      copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable\n"
+        mode: "0644"
+
+    - name: Install Docker Engine and the compose plugin
+      apt:
+        name: [docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin]
+        update_cache: true
+
+    - name: Let the deploy user run docker
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+    # AWS CLI v2 (the apt package is v1 and is missing newer ECR/EKS behaviour)
+    - name: Download AWS CLI v2
+      get_url:
+        url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+        dest: /tmp/awscliv2.zip
+        mode: "0644"
+
+    - name: Unpack AWS CLI v2
+      unarchive:
+        src: /tmp/awscliv2.zip
+        dest: /tmp
+        remote_src: true
+
+    - name: Install AWS CLI v2
+      shell: /tmp/aws/install --update
+      args:
+        creates: /usr/local/bin/aws
+
+    - name: Start and enable Docker
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+    # ---- Application directory ----
+    - name: Create the application directory
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0755"
+
+    - name: Install the compose file
+      copy:
+        src: ../docker-compose.yml
+        dest: "{{ app_dir }}/docker-compose.yml"
+        owner: "{{ ansible_user }}"
+        mode: "0644"
+
+    # ---- nginx reverse proxy (replaces the Kubernetes ingress) ----
+    # certbot runs in webroot mode rather than --nginx, so it never rewrites this
+    # config and re-running the playbook cannot clobber the TLS settings.
+    - name: Create the ACME challenge webroot
+      file:
+        path: /var/www/certbot
+        state: directory
+        mode: "0755"
+
+    - name: Check whether the certificate already exists
+      stat:
+        path: /etc/letsencrypt/live/{{ domain }}/fullchain.pem
+      register: cert_before
+
+    # First run renders an HTTP-only config (nginx cannot start referencing a
+    # certificate that does not exist yet); later runs render the TLS config.
+    - name: Install the nginx site
+      template:
+        src: nginx-site.conf.j2
+        dest: /etc/nginx/sites-available/nexus-ai
+        mode: "0644"
+      vars:
+        tls_enabled: "{{ cert_before.stat.exists }}"
+      notify: reload nginx
+
+    - name: Enable the site
+      file:
+        src: /etc/nginx/sites-available/nexus-ai
+        dest: /etc/nginx/sites-enabled/nexus-ai
+        state: link
+      notify: reload nginx
+
+    - name: Remove the default nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: reload nginx
+
+    - name: Start and enable nginx
+      service:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Apply pending nginx changes before requesting the certificate
+      meta: flush_handlers
+
+    # ---- TLS (free; certbot installs its own auto-renewal timer) ----
+    - name: Obtain the Let's Encrypt certificate
+      command: >
+        certbot certonly --webroot --webroot-path /var/www/certbot
+        --non-interactive --agree-tos
+        --domain {{ domain }} --email {{ letsencrypt_email }}
+      args:
+        creates: /etc/letsencrypt/live/{{ domain }}/fullchain.pem
+
+    - name: Switch nginx to the TLS config now that the certificate exists
+      template:
+        src: nginx-site.conf.j2
+        dest: /etc/nginx/sites-available/nexus-ai
+        mode: "0644"
+      vars:
+        tls_enabled: true
+      when: not cert_before.stat.exists
+      notify: reload nginx
+
+    # ---- Start the stack ----
+    # .env holds real secrets, so it is never committed: copy it to the host once with
+    #   scp host.env ubuntu@<ip>:/opt/nexus-ai/.env
+    - name: Check that the secrets file is present
+      stat:
+        path: "{{ app_dir }}/.env"
+      register: env_file
+
+    - name: Fail with a clear message when the secrets file is missing
+      fail:
+        msg: "{{ app_dir }}/.env is missing. Copy it to the host, then re-run this playbook."
+      when: not env_file.stat.exists
+
+    # The instance profile grants ECR read access, so no keys are stored on the host.
+    # The registry is read from .env so this playbook works against any AWS account.
+    - name: Log in to ECR
+      shell: |
+        set -a; . {{ app_dir }}/.env; set +a
+        aws ecr get-login-password --region {{ aws_region }} |
+          docker login --username AWS --password-stdin "$ECR_REGISTRY"
+      changed_when: false
+
+    - name: Pull images and start the stack
+      command: docker compose up -d --pull always
+      args:
+        chdir: "{{ app_dir }}"
+
+    # ---- Housekeeping: a small disk fills fast with image layers ----
+    - name: Schedule a nightly Docker prune
+      cron:
+        name: docker-prune
+        hour: "3"
+        minute: "0"
+        job: "docker system prune -af >> /var/log/docker-prune.log 2>&1"
+
+    # ECR login tokens expire after 12 hours; refresh so a reboot can pull images
+    - name: Refresh the ECR login regularly
+      cron:
+        name: ecr-login
+        hour: "*/6"
+        minute: "10"
+        job: "set -a; . {{ app_dir }}/.env; set +a; aws ecr get-login-password --region {{ aws_region }} | docker login --username AWS --password-stdin \"$ECR_REGISTRY\" >/dev/null 2>&1"
+
+  handlers:
+    - name: reload nginx
+      service:
+        name: nginx
+        state: reloaded

@@ -1,0 +1,60 @@
+# Single-host stack. Images are built and pushed by each repo's GitHub Actions workflow;
+# this host only pulls them. nginx (on the host) terminates TLS and proxies to these ports.
+#   docker compose pull && docker compose up -d
+services:
+  # Runs TypeORM migrations to completion BEFORE the backend starts (the initContainer
+  # pattern from the Kubernetes setup). The backend waits on this succeeding.
+  migrate:
+    image: ${ECR_REGISTRY}/nexus-ai-backend:${BACKEND_TAG:-latest}
+    command: ["node", "./node_modules/typeorm/cli.js", "migration:run", "-d", "dist/database/data-source.js"]
+    env_file: .env
+    restart: "no"
+
+  backend:
+    image: ${ECR_REGISTRY}/nexus-ai-backend:${BACKEND_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      AI_SERVICE_URL: http://ai-service:8000
+    ports:
+      - "127.0.0.1:3001:3000" # localhost only; nginx is the public entrypoint
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  frontend:
+    image: ${ECR_REGISTRY}/nexus-ai-frontend:${FRONTEND_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  ai-service:
+    image: ${ECR_REGISTRY}/nexus-ai-service:${SERVICE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
