@@ -14,11 +14,29 @@ from app.agents.requirements.intent import classify_requirements_message
 from app.agents.requirements.graph import requirements_graph
 from app.agents.requirements.nodes import (
     check_missing_fields_node,
+    choose_next_question_node,
     extract_requirements_node,
 )
 
 
 class RequirementsSanitizationTests(unittest.TestCase):
+    def test_out_of_order_answer_is_saved_without_losing_the_pending_question(self):
+        result = choose_next_question_node(
+            {
+                "pendingField": "targetUsers",
+                "missingFields": ["targetUsers", "integrations"],
+                "extractedFields": {
+                    "integrations": ["email notifications"],
+                },
+                "assistantReply": None,
+            }
+        )
+
+        self.assertEqual(result["nextQuestionField"], "targetUsers")
+        self.assertEqual(result["replyMode"], "out_of_order_requirement")
+        self.assertIn("saved that under integrations", result["assistantReply"])
+        self.assertIn("Who will use it", result["assistantReply"])
+
     def test_requirements_output_budget_is_large_enough_for_a_complete_brief(self):
         with patch.dict(
             "os.environ",

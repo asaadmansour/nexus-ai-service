@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -195,9 +196,25 @@ def _confirmed_features(request: "ProjectPlanRequest") -> List[str]:
     return []
 
 
+def _requested_team_size(request: "ProjectPlanRequest") -> Optional[int]:
+    value = (request.brief or {}).get("suggestedTeamSize")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    if isinstance(value, str):
+        match = re.search(r"\d+", value)
+        if match:
+            parsed = int(match.group(0))
+            return parsed if parsed > 0 else None
+    return None
+
+
 def validate_and_normalize_plan(
     data: Dict[str, Any],
     confirmed_features: Optional[List[str]] = None,
+    max_team_size: Optional[int] = None,
 ) -> ProjectPlanResponse:
     for index, raw_task in enumerate(data.get("tasks") or []):
         if not isinstance(raw_task, dict) or raw_task.get("checkpoints"):
@@ -352,6 +369,18 @@ def validate_and_normalize_plan(
         errors.append(
             f"Team plan is missing task roles: {', '.join(missing_roles)}."
         )
+    recommended_headcount = sum(
+        max(0, role.count) for role in plan.teamPlan.recommendedRoles
+    )
+    if max_team_size and (
+        plan.teamPlan.suggestedTeamSize > max_team_size
+        or recommended_headcount > max_team_size
+    ):
+        errors.append(
+            "Team plan exceeds the client's maximum implementation team size of "
+            f"{max_team_size}. Assign multiple compatible tasks to the same roles "
+            "instead of adding more freelancers."
+        )
 
     required_spec_sections = {
         "architecture": plan.projectSpec.architecture,
@@ -499,6 +528,7 @@ def generate_project_plan(request: ProjectPlanRequest) -> Dict[str, Any]:
         # introduced a new empty milestone, and generation then gave up entirely).
         # Repair iteratively, feeding each new error back. See ISSUES.md #32.
         confirmed_features = _confirmed_features(request)
+        max_team_size = _requested_team_size(request)
         candidate = result
         validated_plan = None
         last_error: Optional[ProjectPlanGenerationError] = None
@@ -506,7 +536,7 @@ def generate_project_plan(request: ProjectPlanRequest) -> Dict[str, Any]:
         for attempt in range(MAX_PLAN_REPAIR_ATTEMPTS + 1):
             try:
                 validated_plan = validate_and_normalize_plan(
-                    candidate, confirmed_features
+                    candidate, confirmed_features, max_team_size
                 )
                 break
             except ProjectPlanGenerationError as validation_error:
@@ -619,6 +649,9 @@ Important rules:
   any feature is missing.
 - Assign implementation work to implementation roles. The architect and UI/UX roles
   produce contracts and designs; they must not be given the whole build.
+- When brief.suggestedTeamSize is a positive number, treat it as a hard maximum for
+  implementation freelancers. A detailed plan may contain more tasks than people;
+  assign compatible tasks to the same role instead of exceeding that headcount.
 - Every task must include concrete `contractReferences` pointing to the relevant
   API/design/data evidence and `integrationChecks` that another freelancer can run.
   Tasks that change code or assets must include concrete `ownedPaths` establishing a

@@ -114,6 +114,22 @@ class ProjectPlanGenerationTests(unittest.TestCase):
         result = validate_and_normalize_plan(valid_plan())
         self.assertEqual(len(result.tasks), 2)
 
+    def test_client_team_size_is_a_hard_implementation_headcount_limit(self):
+        plan = valid_plan()
+        plan["teamPlan"] = {
+            "recommendedRoles": [
+                {"roleKey": "backend", "count": 2, "skills": ["NestJS"]},
+                {"roleKey": "frontend", "count": 3, "skills": ["Next.js"]},
+            ],
+            "suggestedTeamSize": 5,
+        }
+
+        with self.assertRaisesRegex(
+            ProjectPlanGenerationError,
+            "maximum implementation team size of 4",
+        ):
+            validate_and_normalize_plan(plan, max_team_size=4)
+
     def test_blocking_dependency_must_finish_before_dependent_task(self):
         plan = valid_plan()
         plan["tasks"][1]["startDay"] = 1

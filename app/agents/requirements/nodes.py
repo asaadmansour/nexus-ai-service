@@ -30,6 +30,24 @@ QUESTION_BY_FIELD = {
     "experienceMinYears": "Do you have a minimum years-of-experience preference, or should we keep it open and match based on skill scores instead?",
 }
 
+FIELD_LABELS = {
+    "businessDomain": "business domain",
+    "mainGoal": "main goal",
+    "targetUsers": "target users",
+    "coreFeatures": "core features",
+    "platforms": "platform choice",
+    "solutionType": "solution type",
+    "scopeDetails": "first-release scope",
+    "integrations": "integrations",
+    "adminNeeds": "admin needs",
+    "deliverables": "handover deliverables",
+    "constraintsPreferences": "constraints and preferences",
+    "clientBackground": "client background",
+    "suggestedTeamSize": "team size",
+    "experienceLevel": "experience level",
+    "experienceMinYears": "minimum experience",
+}
+
 
 def prepare_brief_context_node(state: RequirementsState) -> dict[str, Any]:
     current_brief = state.get("currentBrief", {})
@@ -229,14 +247,42 @@ def choose_next_question_node(state: RequirementsState) -> dict[str, Any]:
             "replyMode": "complete",
         }
 
-    next_field = missing_fields[0]
+    pending_field = state.get("pendingField")
+    next_field = (
+        pending_field
+        if isinstance(pending_field, str) and pending_field in missing_fields
+        else missing_fields[0]
+    )
     next_question = QUESTION_BY_FIELD.get(
         next_field,
         "Can you share more details about the project?",
     )
     assistant_reply = state.get("assistantReply")
     reply_mode = state.get("replyMode")
-    if reply_mode == "project_answer" and isinstance(assistant_reply, str):
+    extracted_fields = state.get("extractedFields", {})
+    answered_other_fields = (
+        [
+            field
+            for field in extracted_fields
+            if field != next_field and field in REQUIRED_BRIEF_FIELDS
+        ]
+        if isinstance(extracted_fields, dict)
+        else []
+    )
+    if (
+        isinstance(pending_field, str)
+        and pending_field == next_field
+        and answered_other_fields
+    ):
+        saved_labels = ", ".join(
+            FIELD_LABELS.get(field, field) for field in answered_other_fields[:3]
+        )
+        assistant_reply = (
+            f"Got it - I saved that under {saved_labels}. To keep the scope accurate, "
+            f"I still need this detail: {next_question}"
+        )
+        reply_mode = "out_of_order_requirement"
+    elif reply_mode == "project_answer" and isinstance(assistant_reply, str):
         # The model answers the in-scope question; the graph owns progression.
         assistant_reply = f"{assistant_reply.rstrip()} {next_question}"
     elif not isinstance(assistant_reply, str) or not assistant_reply.strip():
@@ -246,6 +292,7 @@ def choose_next_question_node(state: RequirementsState) -> dict[str, Any]:
         "pendingField": next_field,
         "nextQuestion": next_question,
         "assistantReply": assistant_reply,
+        "replyMode": reply_mode,
     }
 
 
