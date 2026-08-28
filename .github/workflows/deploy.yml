@@ -44,6 +44,9 @@ jobs:
               docker login --username AWS --password-stdin "$ECR_REGISTRY"
             sed -i '/^SERVICE_TAG=/d' .env
             echo "SERVICE_TAG=$GITHUB_SHA" >> .env
+            # Compose prefers an exported shell value over the updated .env file.
+            # Refresh it here so this run cannot silently redeploy the old tag.
+            export SERVICE_TAG="$GITHUB_SHA"
             docker compose pull ai-service
             docker compose up -d --no-deps ai-service
             # Drop images no longer referenced by a container so the disk
