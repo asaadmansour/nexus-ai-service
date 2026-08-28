@@ -38,6 +38,8 @@ jobs:
           envs: GITHUB_SHA
           script: |
             set -euo pipefail
+            exec 9>/tmp/nexus-ai-deploy.lock
+            flock -x 9
             cd /opt/nexus-ai
             set -a; . .env; set +a
             aws ecr get-login-password --region us-east-1 |
