@@ -3,7 +3,7 @@ import os
 import socket
 import urllib.request
 import logging
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -37,6 +37,11 @@ class CVExtractionResponse(BaseModel):
     headline: Optional[str] = None
     skills: list[str] = Field(default_factory=list)
     yearsExperience: Optional[int] = None
+    professionalRole: Optional[Literal[
+        "backend", "frontend", "fullstack", "mobile", "ui_ux",
+        "qa", "devops", "data", "ai_ml", "architect"
+    ]] = None
+    seniorityLevel: Optional[Literal["junior", "mid", "senior"]] = None
     summary: CVSummary = Field(default_factory=CVSummary)
     confidence: float = Field(
         default=0.0,
@@ -248,6 +253,16 @@ Extract:
 
 - yearsExperience:
   Total professional experience calculated only from available dates.
+
+- professionalRole:
+  The single strongest supported professional track, using only one of:
+  backend, frontend, fullstack, mobile, ui_ux, qa, devops, data, ai_ml, architect.
+  Return null if the CV does not support a clear track.
+
+- seniorityLevel:
+  The CV-indicated assessment level: junior, mid, or senior. Use stated title,
+  scope, ownership, and clearly supported years of experience. This is only the
+  difficulty assigned before assessment, not the candidate's final platform rank.
 
 - summary:
   Include:

@@ -91,6 +91,8 @@ class FreelancerCandidate(_Loose):
     freelancerProfileId: str
     name: str | None = None
     headline: str | None = None
+    professionalRole: str | None = None
+    seniorityLevel: str | None = None
     skills: list[str] = Field(default_factory=list)
     skillScores: list[SkillScore] = Field(default_factory=list)
     averageSkillScore: float | None = None       # 0-5, mean of their skill scores
@@ -361,6 +363,14 @@ def _score_rate_fit(cand: FreelancerCandidate, pool_min: float, pool_max: float)
 def _score_role_fit(cand: FreelancerCandidate, role_key: str | None) -> float:
     if not role_key:
         return 0.6
+    normalized_role = _norm(role_key).replace("-", "_")
+    normalized_profession = _norm(cand.professionalRole or "").replace("-", "_")
+    if normalized_role != "principal_reviewer" and normalized_profession:
+        if normalized_profession == normalized_role:
+            return 1.0
+        if normalized_profession == "fullstack" and normalized_role in {"frontend", "backend"}:
+            return 0.9
+
     role_tokens = set(_tokenize(role_key.replace("_", " ")))
     profile_tokens = set(
         _tokenize(
@@ -388,7 +398,10 @@ def _score_role_fit(cand: FreelancerCandidate, role_key: str | None) -> float:
         leadership_bonus = min(
             0.35, len(leadership_terms & profile_tokens) * 0.07
         )
-    return _clamp(0.35 + overlap * 0.45 + leadership_bonus)
+    inferred_fit = _clamp(0.35 + overlap * 0.45 + leadership_bonus)
+    if normalized_profession and normalized_role != "principal_reviewer":
+        return min(inferred_fit, 0.45)
+    return inferred_fit
 
 
 def _score_performance(cand: FreelancerCandidate) -> float:
@@ -499,6 +512,8 @@ def _score_candidate(
             "hourlyRate": cand.hourlyRate,
             "availabilityHours": hours,
             "yearsExperience": cand.yearsExperience or 0,
+            "professionalRole": cand.professionalRole,
+            "seniorityLevel": cand.seniorityLevel,
             "activeTaskCount": cand.activeTaskCount or 0,
             "activeProjectCount": cand.activeProjectCount or 0,
             "performanceScore": cand.performanceScore,

@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -25,6 +25,14 @@ class GenerateAssessmentRequest(BaseModel):
         alias="yearsExperience"
     )
     headline: Optional[str] = None
+    target_role: Optional[Literal[
+        "backend", "frontend", "fullstack", "mobile", "ui_ux",
+        "qa", "devops", "data", "ai_ml", "architect"
+    ]] = Field(default=None, alias="targetRole")
+    target_seniority: Optional[Literal["junior", "mid", "senior"]] = Field(
+        default=None,
+        alias="targetSeniority"
+    )
 
     question_count: int = Field(
         default=40,
@@ -50,6 +58,8 @@ def generate_assessment_route(
             skills=request.skills,
             years_experience=request.years_experience,
             headline=request.headline,
+            target_role=request.target_role,
+            target_seniority=request.target_seniority,
             question_count=request.question_count,
             duration_seconds=request.duration_seconds
         )

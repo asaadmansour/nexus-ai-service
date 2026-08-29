@@ -34,6 +34,33 @@ class FreelancerMatchingTests(unittest.TestCase):
         self.assertEqual(result["candidates"][0]["rank"], 1)
         self.assertIn("no_availability", result["candidates"][1]["evidence"]["riskFlags"])
 
+    def test_assessed_professional_role_is_a_soft_ranking_signal(self):
+        request = MatchFreelancersRequest(
+            matchingRunId="run-role",
+            targetType="task",
+            targetRoleKey="backend",
+            task={"title": "API", "requiredSkills": ["TypeScript"]},
+            candidates=[
+                {
+                    "freelancerProfileId": "frontend",
+                    "professionalRole": "frontend",
+                    "skills": ["TypeScript"],
+                    "availabilityHours": 20,
+                },
+                {
+                    "freelancerProfileId": "backend",
+                    "professionalRole": "backend",
+                    "skills": ["TypeScript"],
+                    "availabilityHours": 20,
+                },
+            ],
+        )
+
+        result = match_freelancers(request)
+
+        self.assertEqual(result["candidates"][0]["freelancerProfileId"], "backend")
+        self.assertEqual(len(result["candidates"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -169,6 +169,8 @@ def generate_assessment(
     skills: List[str],
     years_experience: Optional[int],
     headline: Optional[str],
+    target_role: Optional[str] = None,
+    target_seniority: Optional[str] = None,
     question_count: int = 6,
     duration_seconds: int = 1800
 ) -> dict:
@@ -203,11 +205,14 @@ Candidate profile:
 - Headline: <CANDIDATE_DATA>{headline or "Unknown"}</CANDIDATE_DATA>
 - Main skills to evaluate: <CANDIDATE_DATA>{', '.join(skills) if skills else "General software development"}</CANDIDATE_DATA>
 - Years of experience: {experience_label}
+- Assigned professional track: {target_role or "Unclassified"}
+- Assigned assessment level: {target_seniority or "Infer conservatively from the evidence"}
 
 Assessment requirements:
 - Generate EXACTLY {question_count} questions.
 - Duration target: {duration_seconds} seconds.
-- Questions must match the candidate's experience level.
+- Questions must test the assigned professional track and match the assigned assessment level.
+- The assigned level controls difficulty; do not silently promote or demote it while generating questions.
 - Do not ask unrealistic senior-level questions for junior candidates.
 - Include at least one scenario question.
 - For larger assessments, keep each prompt focused enough to be answered within the total duration.
