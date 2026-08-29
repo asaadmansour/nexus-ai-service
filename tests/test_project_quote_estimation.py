@@ -152,6 +152,45 @@ class ProjectQuoteEstimationTests(unittest.TestCase):
 
         self.assertGreater(application["amount"], landing["amount"] * 3)
 
+    def test_detailed_planning_does_not_inflate_a_focused_web_app(self):
+        request = ProjectQuoteRequest(
+            project={
+                "budgetMin": 500,
+                "budgetMax": 100_000,
+                "currency": "EGP",
+                "deadline": "2027-10-10T00:00:00.000Z",
+            },
+            brief={
+                "mainGoal": "Manage appointment booking and a daily clinic queue",
+                "targetUsers": ["patients", "reception staff", "clinic managers"],
+                "coreFeatures": [
+                    "patients book appointments",
+                    "patients reschedule appointments",
+                    "reception staff manage daily queue",
+                    "clinic managers review appointment activity",
+                ],
+                "platforms": ["website"],
+                "solutionType": "web app",
+                "scopeDetails": (
+                    "One-location booking, reception queue, and manager reporting workflows"
+                ),
+                "integrations": ["none"],
+                "adminNeeds": "no admin dashboard",
+                "deliverables": [
+                    "working website",
+                    "source code",
+                    "deployment help",
+                ],
+                "suggestedTeamSize": 2,
+                "requirementProfile": {"complexity": "complex"},
+            },
+        )
+
+        self.assertEqual(_scope_tier(request.brief), "standard")
+        quote = _fallback_quote(request, "fallback")
+        self.assertGreaterEqual(quote["amount"], 35_000)
+        self.assertLessEqual(quote["amount"], 40_000)
+
     def test_fallback_rates_are_expressed_in_the_project_currency(self):
         request = self.request(10_000)
         request.project["currency"] = "USD"
