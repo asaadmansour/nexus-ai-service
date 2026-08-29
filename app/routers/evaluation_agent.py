@@ -2,7 +2,7 @@ import logging
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.agents.submission_evaluation import (
     SubmissionEvaluationError,
@@ -26,6 +26,11 @@ class BriefForEvaluation(BaseModel):
     domain: str | None = None
     acceptance_criteria: list[str] = Field(default_factory=list, alias="acceptanceCriteria")
 
+    @field_validator("acceptance_criteria", mode="before")
+    @classmethod
+    def normalize_nullable_list(cls, value: Any) -> Any:
+        return [] if value is None else value
+
 
 class TaskForEvaluation(BaseModel):
     task_id: str = Field(alias="taskId")
@@ -38,6 +43,19 @@ class TaskForEvaluation(BaseModel):
     contract_references: list[str] = Field(default_factory=list, alias="contractReferences")
     owned_paths: list[str] = Field(default_factory=list, alias="ownedPaths")
     quality_criteria: list[str] = Field(default_factory=list, alias="qualityCriteria")
+
+    @field_validator(
+        "deliverables",
+        "acceptance_criteria",
+        "integration_checks",
+        "contract_references",
+        "owned_paths",
+        "quality_criteria",
+        mode="before",
+    )
+    @classmethod
+    def normalize_nullable_lists(cls, value: Any) -> Any:
+        return [] if value is None else value
 
 
 class SubmissionForEvaluation(BaseModel):
@@ -65,6 +83,11 @@ class PriorEvaluation(BaseModel):
     unmet_criteria: list[str] = Field(default_factory=list, alias="unmetCriteria")
     completed_at: str | None = Field(default=None, alias="completedAt")
 
+    @field_validator("unmet_criteria", mode="before")
+    @classmethod
+    def normalize_nullable_list(cls, value: Any) -> Any:
+        return [] if value is None else value
+
 
 class EvaluateSubmissionRequest(BaseModel):
     project: ProjectForEvaluation
@@ -78,6 +101,11 @@ class EvaluateSubmissionRequest(BaseModel):
         default_factory=list,
         alias="evaluationHistory",
     )
+
+    @field_validator("evaluation_history", mode="before")
+    @classmethod
+    def normalize_nullable_history(cls, value: Any) -> Any:
+        return [] if value is None else value
 
 
 @router.post("/evaluate-submission")

@@ -12,9 +12,36 @@ from app.agents.submission_evaluation import (
     _normalize,
     _required_rubric_criteria,
 )
+from app.routers.evaluation_agent import EvaluateSubmissionRequest
 
 
 class SubmissionEvaluationTests(unittest.TestCase):
+    def test_request_normalizes_nullable_legacy_list_fields(self):
+        request = EvaluateSubmissionRequest.model_validate(
+            {
+                "project": {"projectId": "project-1"},
+                "task": {
+                    "taskId": "task-1",
+                    "title": "Final delivery",
+                    "acceptanceCriteria": None,
+                    "deliverables": None,
+                    "qualityCriteria": None,
+                },
+                "submission": {
+                    "submissionId": "submission-1",
+                    "submissionType": "repo",
+                },
+                "brief": {"acceptanceCriteria": None},
+                "evaluationHistory": None,
+            }
+        )
+
+        self.assertEqual(request.task.acceptance_criteria, [])
+        self.assertEqual(request.task.deliverables, [])
+        self.assertEqual(request.task.quality_criteria, [])
+        self.assertEqual(request.brief.acceptance_criteria, [])
+        self.assertEqual(request.evaluation_history, [])
+
     @patch.dict("os.environ", {}, clear=True)
     def test_uses_supported_shared_default_when_environment_is_missing(self):
         self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-3.1-flash-lite")
