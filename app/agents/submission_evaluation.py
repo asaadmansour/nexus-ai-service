@@ -545,8 +545,9 @@ def _deterministic_findings(request: Dict[str, Any]) -> Dict[str, Dict[str, Any]
             if test_criterion:
                 findings[test_criterion] = {
                     "criterion": test_criterion,
+                    "status": "unverified",
                     "met": False,
-                    "evidence": "No executable automated test check was discovered for the submitted implementation.",
+                    "evidence": "No executable automated test check was available to the read-only evaluator; a human reviewer must verify the supplied tests or provide completed check evidence.",
                 }
         for item in verification.get("results") or []:
             if not isinstance(item, dict) or item.get("status") not in {"passed", "failed"}:

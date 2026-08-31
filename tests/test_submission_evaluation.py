@@ -268,7 +268,7 @@ class SubmissionEvaluationTests(unittest.TestCase):
         self.assertFalse(rejected["passed"])
         self.assertEqual(rejected["rubric"][0]["status"], "unmet")
 
-    def test_missing_tests_fail_only_when_task_specific_rubric_requires_them(self):
+    def test_missing_executable_test_evidence_routes_to_manual_review(self):
         test_criterion = {
             "key": "verification_automated_tests",
             "criterion": "Automated tests cover the changed behavior.",
@@ -318,8 +318,11 @@ class SubmissionEvaluationTests(unittest.TestCase):
             item for item in result["rubric"] if item["key"] == "verification_automated_tests"
         )
         self.assertFalse(test_row["met"])
+        self.assertEqual(test_row["status"], "unverified")
         self.assertIn("No executable automated test", test_row["evidence"])
-        self.assertFalse(result["passed"])
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["requiresHumanReview"])
+        self.assertFalse(result["revisionRequested"])
 
     def test_complete_sandbox_inspection_does_not_force_manual_review(self):
         request = {
